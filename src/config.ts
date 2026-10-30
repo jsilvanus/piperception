@@ -1,0 +1,44 @@
+import type { AppConfig, CameraStreamConfig } from './types.js';
+
+export function loadConfig(): AppConfig {
+  const port = parseInt(process.env.PORT ?? '3110', 10);
+  const host = process.env.HOST ?? '0.0.0.0';
+  const pispaceUrl = process.env.PISPACE_URL ?? 'http://127.0.0.1:3108';
+  const pigatewayUrl = process.env.PIGATEWAY_URL ?? 'http://127.0.0.1:3100';
+  const autoPushPiSpace = process.env.AUTO_PUSH !== 'false';
+  const defaultFps = parseInt(process.env.DEFAULT_FPS ?? '10', 10);
+  const modelPath = process.env.PERCEPTION_MODEL_PATH;
+
+  // Default camera streams configured for Riihimäen Keskuskirkko
+  const defaultStreams: CameraStreamConfig[] = [
+    {
+      cameraId: 'cam1',
+      name: 'Cam 1 (Chancel Pillar / Altar)',
+      sourceType: 'simulation',
+      simulationPath: 'altar',
+      fps: defaultFps,
+      enabled: true,
+      confThreshold: 0.45,
+    },
+    {
+      cameraId: 'cam2',
+      name: 'Cam 2 (Organ Gallery / Balcony)',
+      sourceType: 'simulation',
+      simulationPath: 'wander',
+      fps: defaultFps,
+      enabled: true,
+      confThreshold: 0.45,
+    },
+  ];
+
+  return {
+    port,
+    host,
+    pispaceUrl,
+    pigatewayUrl,
+    autoPushPiSpace,
+    defaultFps,
+    modelPath,
+    streams: defaultStreams,
+  };
+}
