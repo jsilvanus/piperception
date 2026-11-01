@@ -6,7 +6,7 @@ import { PiSpacePusher } from '../src/sink/pispace-pusher.js';
 import { StubDetector } from '../src/detector/stub-backend.js';
 
 test('Fastify server endpoints and manual frame processing', async () => {
-  const pusher = new PiSpacePusher('http://127.0.0.1:3108');
+  const pusher = new PiSpacePusher('http://127.0.0.1:3203');
   const streamManager = new StreamManager(pusher, false);
 
   const stub = new StubDetector([
@@ -28,9 +28,9 @@ test('Fastify server endpoints and manual frame processing', async () => {
   );
 
   const app = createServer(streamManager, pusher, {
-    port: 3110,
+    port: 3202,
     host: '127.0.0.1',
-    pispaceUrl: 'http://127.0.0.1:3108',
+    pispaceUrl: 'http://127.0.0.1:3203',
     autoPushPiSpace: false,
     defaultFps: 10,
     streams: [],

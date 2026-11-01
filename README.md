@@ -2,7 +2,7 @@
 
 **PiPerception** is the real-time computer vision, person detection, and multi-object tracking microservice for the **Pi Ecosystem** (`piecosystem`).
 
-It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU/GPU) and ByteTrack multi-target association, and outputs normalized 2D bounding boxes (`[ymin, xmin, ymax, xmax]`) directly into **PiSpace** (`pispace`, port `3108`) for 3D spatial raycasting and sanctuary zone verification.
+It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU/GPU) and ByteTrack multi-target association, and outputs normalized 2D bounding boxes (`[ymin, xmin, ymax, xmax]`) directly into **PiSpace** (`pispace`, port `3203`) for 3D spatial raycasting and sanctuary zone verification.
 
 ```
  [AVer PTZ Cameras]     [Simulation Engine]      [HTTP Frame Ingest]
@@ -23,7 +23,7 @@ It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU
                                   ▼
            ┌─────────────────────────────────────────────┐
            │        PiSpace Perception Pusher            │
-           │     POST http://127.0.0.1:3108/perception   │
+           │     POST http://127.0.0.1:3203/perception   │
            └──────────────────────┬──────────────────────┘
                                   ▼
              [PiSpace: 3D Floor Raycasting & Zones]
@@ -51,7 +51,7 @@ It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU
 - **PiSpace Integration**:
   - Background worker pushes formatted 2D tracking events directly into `pispace` (`POST /api/v1/perception`).
 - **Interactive Web UI Console**:
-  - Fastify server hosts an operational dashboard on `http://localhost:3110` with live HTML5 canvas tracking, bounding box overlays, and telemetry.
+  - Fastify server hosts an operational dashboard on `http://localhost:3202` with live HTML5 canvas tracking, bounding box overlays, and telemetry.
 
 ---
 
@@ -59,7 +59,7 @@ It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU
 
 | Port | Protocol | Purpose |
 | :--- | :--- | :--- |
-| **3110** | HTTP | REST API, SSE (`/api/v1/events`), and Web Dashboard |
+| **3202** | HTTP | REST API, SSE (`/api/v1/events`), and Web Dashboard |
 
 ---
 
@@ -97,19 +97,19 @@ It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU
 
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Run unit tests
-npm test
+pnpm test
 
 # Build TypeScript to dist/
-npm run build
+pnpm run build
 
 # Start production server
-npm start
+pnpm start
 
 # Start development mode with hot reload
-npm run dev
+pnpm run dev
 ```
 
 ---

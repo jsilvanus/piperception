@@ -1,10 +1,10 @@
 import type { AppConfig, CameraStreamConfig } from './types.js';
 
 export function loadConfig(): AppConfig {
-  const port = parseInt(process.env.PORT ?? '3110', 10);
+  const port = parseInt(process.env.PORT ?? '3202', 10);
   const host = process.env.HOST ?? '0.0.0.0';
-  const pispaceUrl = process.env.PISPACE_URL ?? 'http://127.0.0.1:3108';
-  const pigatewayUrl = process.env.PIGATEWAY_URL ?? 'http://127.0.0.1:3100';
+  const pispaceUrl = process.env.PISPACE_URL ?? 'http://127.0.0.1:3203';
+  const pigatewayUrl = process.env.PIGATEWAY_URL ?? 'http://127.0.0.1:3000';
   const autoPushPiSpace = process.env.AUTO_PUSH !== 'false';
   const defaultFps = parseInt(process.env.DEFAULT_FPS ?? '10', 10);
   const modelPath = process.env.PERCEPTION_MODEL_PATH;

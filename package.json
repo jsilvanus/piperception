@@ -1,6 +1,7 @@
 {
   "name": "piperception",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.23.0",
   "private": true,
   "type": "module",
   "description": "Real-time neural person detection, ByteTrack tracking, and 2D bounding box extraction service for PiSpace",
@@ -28,5 +29,13 @@
   "files": [
     "dist",
     "bin"
-  ]
+  ],
+  "pi": {
+    "service": "piperception",
+    "layer": "Layer 2: Media pipeline",
+    "displayName": "PiPerception",
+    "port": 3202,
+    "healthEndpoint": "/health",
+    "envPortVar": "PORT"
+  }
 }
