@@ -32,6 +32,7 @@
   ],
   "pi": {
     "service": "piperception",
+    "layer": "Layer 2: Media pipeline",
     "displayName": "PiPerception",
     "port": 3202,
     "healthEndpoint": "/health",
