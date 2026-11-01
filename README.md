@@ -97,19 +97,19 @@ It ingests camera feeds, runs neural person detection (YOLOX on ONNX Runtime CPU
 
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Run unit tests
-npm test
+pnpm test
 
 # Build TypeScript to dist/
-npm run build
+pnpm run build
 
 # Start production server
-npm start
+pnpm start
 
 # Start development mode with hot reload
-npm run dev
+pnpm run dev
 ```
 
 ---
