@@ -33,7 +33,7 @@
   "pi": {
     "service": "piperception",
     "displayName": "PiPerception",
-    "port": 3110,
+    "port": 3202,
     "healthEndpoint": "/health",
     "envPortVar": "PORT"
   }
