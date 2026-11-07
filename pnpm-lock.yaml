@@ -14,6 +14,9 @@ importers:
       fastify:
         specifier: ^5.2.1
         version: 5.12.7
+      fffleet:
+        specifier: file:..\fffleet\packages\fffleet
+        version: file:../fffleet/packages/fffleet
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -273,6 +276,10 @@ packages:
 
   fastq@1.20.3:
     resolution: {integrity: sha512-XKv5nnLs6nLF71NgiKJLIZFLkPyIEuOselLG7ujZnGrRfQK8HpvY+WqKhAJUAdLomwVHErVS4LfxFlPq0/FTAw==}
+
+  fffleet@file:../fffleet/packages/fffleet:
+    resolution: {directory: ../fffleet/packages/fffleet, type: directory}
+    engines: {node: '>=20'}
 
   find-my-way@9.10.0:
     resolution: {integrity: sha512-eru+uCPQ2g+nLBkf84MHP/KyNNMar0BDy0j+i8Fb72GF9/YHBZ58q7FODUtfVV7XU9nfRUHXSmaM8NmZcIbZ4Q==}
@@ -600,6 +607,8 @@ snapshots:
   fastq@1.20.3:
     dependencies:
       reusify: 1.1.0
+
+  fffleet@file:../fffleet/packages/fffleet: {}
 
   find-my-way@9.10.0:
     dependencies:

@@ -9,6 +9,7 @@ import type { DetectorBackend } from '../detector/types.js';
 import { SimulationDetector } from '../detector/simulation-backend.js';
 import { StubDetector } from '../detector/stub-backend.js';
 import { PiSpacePusher } from '../sink/pispace-pusher.js';
+import type { UdpTrackingPublisher } from '../sink/udp-tracking-publisher.js';
 
 export interface CameraStreamState {
   config: CameraStreamConfig;
@@ -26,16 +27,22 @@ export interface CameraStreamState {
 export class StreamManager extends EventEmitter {
   private streams = new Map<string, CameraStreamState>();
   private pusher: PiSpacePusher | null = null;
+  private udpPublisher: UdpTrackingPublisher | null = null;
   private autoPush = true;
 
-  constructor(pusher?: PiSpacePusher, autoPush = true) {
+  constructor(pusher?: PiSpacePusher, autoPush = true, udpPublisher?: UdpTrackingPublisher) {
     super();
     this.pusher = pusher ?? null;
     this.autoPush = autoPush;
+    this.udpPublisher = udpPublisher ?? null;
   }
 
   setPusher(pusher: PiSpacePusher): void {
     this.pusher = pusher;
+  }
+
+  setUdpPublisher(publisher: UdpTrackingPublisher | null): void {
+    this.udpPublisher = publisher;
   }
 
   /** Register and optionally start a camera stream */
@@ -122,6 +129,11 @@ export class StreamManager extends EventEmitter {
 
         this.emit('detection', event);
 
+        // Auto-push to UDP Gateway
+        if (this.udpPublisher) {
+          this.udpPublisher.sendTracks(cameraId, tracks, now);
+        }
+
         // Auto-push to PiSpace
         if (this.autoPush && this.pusher && tracks.length > 0) {
           this.pusher.pushDetections(cameraId, tracks).catch(() => {});
@@ -179,6 +191,10 @@ export class StreamManager extends EventEmitter {
     };
 
     this.emit('detection', event);
+
+    if (this.udpPublisher) {
+      this.udpPublisher.sendTracks(cameraId, tracks, now);
+    }
 
     if (this.autoPush && this.pusher && tracks.length > 0) {
       await this.pusher.pushDetections(cameraId, tracks);

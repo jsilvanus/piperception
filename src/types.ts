@@ -44,7 +44,32 @@ export interface CameraFrameDetection {
   }>;
 }
 
-export type StreamSourceType = 'rtsp' | 'http' | 'simulation' | 'mock';
+export type StreamSourceType = 'rtsp' | 'rtmp' | 'mediamtx' | 'http' | 'simulation' | 'mock';
+
+export interface FeedConfig {
+  cameraId: string;
+  name?: string | undefined;
+  sourceType: StreamSourceType;
+  url?: string | undefined;
+  fps?: number | undefined;
+  scale?: string | undefined;
+  quality?: number | undefined;
+  fleetUrl?: string | undefined;
+  enabled?: boolean | undefined;
+  confThreshold?: number | undefined;
+  nmsThreshold?: number | undefined;
+  simulationPath?: 'altar' | 'pulpit' | 'lectern' | 'choir' | 'wander' | undefined;
+}
+
+export type FeedStatus = 'stopped' | 'starting' | 'active' | 'error';
+
+export interface FeedState {
+  config: FeedConfig;
+  status: FeedStatus;
+  framesIngested: number;
+  lastFrameAtMs: number;
+  lastError?: string | undefined;
+}
 
 export interface CameraStreamConfig {
   cameraId: string;
@@ -66,5 +91,11 @@ export interface AppConfig {
   autoPushPiSpace: boolean;
   defaultFps: number;
   modelPath?: string | undefined;
+  mediaMtxRtspBaseUrl?: string | undefined;
+  mediaMtxRtmpBaseUrl?: string | undefined;
+  fffleetUrl?: string | undefined;
+  udpGatewayHost?: string | undefined;
+  udpGatewayPort?: number | undefined;
+  udpGatewayEnabled?: boolean | undefined;
   streams: CameraStreamConfig[];
 }

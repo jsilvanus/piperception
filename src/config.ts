@@ -8,6 +8,12 @@ export function loadConfig(): AppConfig {
   const autoPushPiSpace = process.env.AUTO_PUSH !== 'false';
   const defaultFps = parseInt(process.env.DEFAULT_FPS ?? '10', 10);
   const modelPath = process.env.PERCEPTION_MODEL_PATH;
+  const mediaMtxRtspBaseUrl = process.env.MEDIAMTX_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
+  const mediaMtxRtmpBaseUrl = process.env.MEDIAMTX_RTMP_BASE_URL ?? 'rtmp://127.0.0.1:1935';
+  const fffleetUrl = process.env.FFFLEET_URL ?? 'http://127.0.0.1:5000';
+  const udpGatewayHost = process.env.UDP_GATEWAY_HOST ?? '127.0.0.1';
+  const udpGatewayPort = parseInt(process.env.UDP_GATEWAY_PORT ?? '40002', 10);
+  const udpGatewayEnabled = process.env.UDP_GATEWAY_ENABLED !== 'false';
 
   // Default camera streams configured for Riihimäen Keskuskirkko
   const defaultStreams: CameraStreamConfig[] = [
@@ -39,6 +45,12 @@ export function loadConfig(): AppConfig {
     autoPushPiSpace,
     defaultFps,
     modelPath,
+    mediaMtxRtspBaseUrl,
+    mediaMtxRtmpBaseUrl,
+    fffleetUrl,
+    udpGatewayHost,
+    udpGatewayPort,
+    udpGatewayEnabled,
     streams: defaultStreams,
   };
 }

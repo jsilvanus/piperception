@@ -1,14 +1,18 @@
 import fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
-import type { AppConfig, CameraStreamConfig } from './types.js';
+import type { AppConfig, CameraStreamConfig, FeedConfig } from './types.js';
 import type { StreamManager } from './stream/stream-manager.js';
 import type { PiSpacePusher } from './sink/pispace-pusher.js';
+import type { FeedManager } from './ingest/feed-manager.js';
+import type { UdpTrackingPublisher } from './sink/udp-tracking-publisher.js';
 import { SimulationDetector } from './detector/simulation-backend.js';
 
 export function createServer(
   streamManager: StreamManager,
   pusher: PiSpacePusher,
-  config: AppConfig
+  config: AppConfig,
+  feedManager?: FeedManager,
+  udpPublisher?: UdpTrackingPublisher
 ): FastifyInstance {
   const app = fastify({ logger: false });
 
@@ -21,7 +25,9 @@ export function createServer(
       service: 'piperception',
       version: '0.1.0',
       activeStreams: streamManager.getAllStreams().filter((s) => s.running).length,
+      activeFeeds: feedManager ? feedManager.getAllFeeds().filter((f) => f.status === 'active').length : 0,
       pispaceConnected: pusher.getStats().connected,
+      udpTelemetry: udpPublisher?.getStats() ?? null,
     };
   });
 
@@ -89,6 +95,87 @@ export function createServer(
   // PiSpace Pusher telemetry
   app.get('/api/v1/pusher', async () => {
     return pusher.getStats();
+  });
+
+  // Feeds lifecycle (MediaMTX / RTSP / ff-fleet)
+  app.get('/api/v1/feeds', async () => {
+    return feedManager ? feedManager.getAllFeeds() : [];
+  });
+
+  app.post<{ Body: FeedConfig | FeedConfig[] }>('/api/v1/feeds/setup', async (req, reply) => {
+    if (!feedManager) {
+      return reply.code(503).send({ error: 'FeedManager not initialized' });
+    }
+    const body = req.body;
+    if (Array.isArray(body)) {
+      const results = body.map((f) => feedManager.setupFeed(f));
+      return { ok: true, feeds: results };
+    }
+    if (!body?.cameraId) {
+      return reply.code(400).send({ error: 'Missing cameraId in feed configuration' });
+    }
+    const state = feedManager.setupFeed(body);
+    return { ok: true, feed: state };
+  });
+
+  app.post<{ Params: { cameraId: string }; Body: Partial<FeedConfig> }>(
+    '/api/v1/feeds/:cameraId/setup',
+    async (req, reply) => {
+      if (!feedManager) {
+        return reply.code(503).send({ error: 'FeedManager not initialized' });
+      }
+      const cameraId = req.params.cameraId;
+      const body = req.body ?? {};
+      const state = feedManager.setupFeed({
+        cameraId,
+        sourceType: body.sourceType ?? 'mediamtx',
+        ...body,
+      });
+      return { ok: true, feed: state };
+    }
+  );
+
+  app.post<{ Params: { cameraId: string } }>('/api/v1/feeds/:cameraId/start', async (req, reply) => {
+    if (!feedManager) {
+      return reply.code(503).send({ error: 'FeedManager not initialized' });
+    }
+    const started = await feedManager.startFeed(req.params.cameraId);
+    if (!started) {
+      return reply.code(404).send({ error: `Feed ${req.params.cameraId} failed to start or not found` });
+    }
+    return { ok: true, cameraId: req.params.cameraId, running: true };
+  });
+
+  app.post<{ Params: { cameraId: string } }>('/api/v1/feeds/:cameraId/stop', async (req, reply) => {
+    if (!feedManager) {
+      return reply.code(503).send({ error: 'FeedManager not initialized' });
+    }
+    const stopped = await feedManager.stopFeed(req.params.cameraId);
+    if (!stopped) {
+      return reply.code(404).send({ error: `Feed ${req.params.cameraId} not found` });
+    }
+    return { ok: true, cameraId: req.params.cameraId, running: false };
+  });
+
+  app.post('/api/v1/feeds/start', async (_req, reply) => {
+    if (!feedManager) {
+      return reply.code(503).send({ error: 'FeedManager not initialized' });
+    }
+    const results = await feedManager.startAll();
+    return { ok: true, results };
+  });
+
+  app.post('/api/v1/feeds/stop', async (_req, reply) => {
+    if (!feedManager) {
+      return reply.code(503).send({ error: 'FeedManager not initialized' });
+    }
+    await feedManager.stopAll();
+    return { ok: true, stopped: true };
+  });
+
+  // UDP Telemetry stats
+  app.get('/api/v1/telemetry/udp', async () => {
+    return udpPublisher?.getStats() ?? { enabled: false };
   });
 
   // Manual Frame Ingestion

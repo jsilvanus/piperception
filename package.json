@@ -19,7 +19,8 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
-    "fastify": "^5.2.1"
+    "fastify": "^5.2.1",
+    "fffleet": "file:..\\fffleet\\packages\\fffleet"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
