@@ -28,6 +28,15 @@ export function loadConfig(): AppConfig {
   const fffleetUrl = process.env.FFFLEET_URL ?? 'http://127.0.0.1:5000';
   const udpGatewayHost = process.env.UDP_GATEWAY_HOST ?? '127.0.0.1';
   const udpGatewayPort = parseInt(process.env.UDP_GATEWAY_PORT ?? '40002', 10);
+  // Remote detection on a fleet worker with the perception-detect executor (the operator PC); local = fallback.
+  const remoteDetect = process.env.PERCEPTION_REMOTE_DETECT === 'off' ? 'off' : 'auto';
+  const remoteModel = process.env.PERCEPTION_REMOTE_MODEL || undefined;
+  const remoteWorkers = list(process.env.PERCEPTION_REMOTE_WORKERS);
+  const remoteRequires = list(process.env.PERCEPTION_REMOTE_REQUIRES);
+  const remoteCheckMs = int(process.env.PERCEPTION_REMOTE_CHECK_MS);
+  // Local detection rate cap and threads: a Pi 4 keeps up with 2 cameras at 1 fps on 2 threads.
+  const localFps = num(process.env.PERCEPTION_LOCAL_FPS) ?? 1;
+  const ortThreads = int(process.env.PERCEPTION_ORT_THREADS);
   const udpGatewayEnabled = process.env.UDP_GATEWAY_ENABLED !== 'false';
 
   // Default camera streams. PERCEPTION_SOURCE=mediamtx uses the real analysis streams, else simulation.
@@ -87,10 +96,27 @@ export function loadConfig(): AppConfig {
     feedWorkerPreference,
     feedRequires,
     autostartFeeds,
+    remoteDetect,
+    remoteModel,
+    remoteWorkers,
+    remoteRequires,
+    remoteCheckMs,
+    localFps,
+    ortThreads,
   };
 }
 
 function list(v: string | undefined): string[] | undefined {
   if (v === undefined) return undefined;
   return v.split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+function int(v: string | undefined): number | undefined {
+  const n = Number.parseInt(v ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function num(v: string | undefined): number | undefined {
+  const n = Number.parseFloat(v ?? '');
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }

@@ -66,6 +66,8 @@ export interface FeedConfig {
   mjpegWorkers?: string[] | undefined;
   workerPreference?: string[] | undefined;
   requires?: string[] | undefined;
+  /** false: never use remote detection for this camera. */
+  remoteDetect?: boolean | undefined;
   enabled?: boolean | undefined;
   confThreshold?: number | undefined;
   nmsThreshold?: number | undefined;
@@ -83,6 +85,14 @@ export interface FeedState {
   format?: 'rgb24' | 'jpeg' | undefined;
   variant?: string | null | undefined;
   lastError?: string | undefined;
+  /** local: frames come here and are analysed here; remote: a fleet worker analyses and sends detections. */
+  detection?: 'local' | 'remote' | undefined;
+  remoteJobId?: string | undefined;
+  remoteWorker?: string | null | undefined;
+  remoteModel?: string | undefined;
+  remoteInferenceMs?: number | undefined;
+  /** Why the last remote attempt failed (the camera is then on the local feed). */
+  remoteError?: string | undefined;
 }
 
 export interface CameraStreamConfig {
@@ -124,4 +134,11 @@ export interface AppConfig {
   feedWorkerPreference?: string[] | undefined;
   feedRequires?: string[] | undefined;
   autostartFeeds?: boolean | undefined;
+  remoteDetect?: 'auto' | 'off' | undefined;
+  remoteModel?: string | undefined;
+  remoteWorkers?: string[] | undefined;
+  remoteRequires?: string[] | undefined;
+  remoteCheckMs?: number | undefined;
+  localFps?: number | undefined;
+  ortThreads?: number | undefined;
 }

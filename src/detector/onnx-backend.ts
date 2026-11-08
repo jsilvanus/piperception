@@ -25,6 +25,8 @@ export interface OnnxDetectorOptions {
   decodedOutput?: boolean | undefined;
   /** onnxruntime execution providers, e.g. ['cuda', 'cpu']. Default ['cpu']. */
   executionProviders?: string[] | undefined;
+  /** onnxruntime intra-op threads (unset = onnxruntime's default, all cores). 2 suits a Pi 4. */
+  threads?: number | undefined;
 }
 
 export class OnnxDetector implements DetectorBackend {
@@ -38,6 +40,7 @@ export class OnnxDetector implements DetectorBackend {
   private readonly channelOrder: 'bgr' | 'rgb';
   private readonly decodedOutput: boolean;
   private readonly executionProviders: string[];
+  private readonly threads: number | undefined;
 
   constructor(options: OnnxDetectorOptions) {
     this.modelPath = options.modelPath;
@@ -47,6 +50,7 @@ export class OnnxDetector implements DetectorBackend {
     this.channelOrder = options.channelOrder ?? 'bgr';
     this.decodedOutput = options.decodedOutput ?? false;
     this.executionProviders = options.executionProviders ?? ['cpu'];
+    this.threads = options.threads && options.threads > 0 ? options.threads : undefined;
   }
 
   async init(): Promise<void> {
@@ -65,6 +69,7 @@ export class OnnxDetector implements DetectorBackend {
     this.session = await runtime.InferenceSession.create(this.modelPath, {
       executionProviders: this.executionProviders,
       graphOptimizationLevel: 'all',
+      ...(this.threads ? { intraOpNumThreads: this.threads, interOpNumThreads: 1 } : {}),
     });
   }
 

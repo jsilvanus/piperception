@@ -23,6 +23,7 @@ export async function startPerceptionServer(): Promise<void> {
   console.log(`Default FPS:     ${config.defaultFps}`);
   console.log(`picam context:   ${config.picamUrl ?? 'off (no gating)'}`);
   console.log(`Model:           ${config.modelPath ?? 'none (stub detector)'}`);
+  console.log(`Remote detect:   ${config.remoteDetect}${config.remoteDetect === 'auto' ? ` (model ${config.remoteModel ?? 'yolox_tiny'})` : ''}; local cap ${config.localFps} fps`);
   console.log(`Streams Config:  ${config.streams.map((s) => s.cameraId).join(', ')}`);
   console.log('='.repeat(60));
 
@@ -42,6 +43,7 @@ export async function startPerceptionServer(): Promise<void> {
     inputSize: config.modelInputSize,
     channelOrder: config.modelChannelOrder,
     executionProviders: config.ortProviders,
+    threads: config.ortThreads,
   });
   streamManager.setDefaultDetector(detector);
   console.log(`Detector:        ${detectorInfo.name}${detectorInfo.reason ? ` (${detectorInfo.reason})` : ''}`);
@@ -74,6 +76,19 @@ export async function startPerceptionServer(): Promise<void> {
     workerPreference: config.feedWorkerPreference,
     requires: config.feedRequires,
     hub,
+    localFps: config.localFps,
+    remote: {
+      mode: config.remoteDetect,
+      model: config.remoteModel,
+      inputSize: config.modelInputSize,
+      channelOrder: config.modelChannelOrder,
+      workerPreference: config.remoteWorkers,
+      requires: config.remoteRequires,
+      checkIntervalMs: config.remoteCheckMs,
+    },
+  });
+  feedManager.on('feed:remote', (e: any) => {
+    console.log(`[remote-detect] ${e.cameraId}: ${e.state}${e.error ? ` (${e.error}; retry in ${Math.round(e.retryInMs / 1000)} s)` : ''}`);
   });
 
   // Initialize configured streams

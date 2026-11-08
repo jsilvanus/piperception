@@ -23,6 +23,10 @@ export interface PerceptionSettings {
 /** While nothing changes, an empty or degraded state is re-sent to PiSpace this often. */
 const EMPTY_PUSH_INTERVAL_MS = 2000;
 
+function isDetectionsFrame(frame: Frame | Buffer | undefined): frame is Frame {
+  return !!frame && !Buffer.isBuffer(frame) && frame.format === 'detections';
+}
+
 export interface CameraStreamState {
   config: CameraStreamConfig;
   tracker: ByteTracker;
@@ -39,6 +43,8 @@ export interface CameraStreamState {
   degradedReasons: GateReason[];
   presetId: number | null;
   trackerResets: number;
+  /** Where the last analysed frame's detections came from: this process or a remote fffleet worker. */
+  detectionSource: 'local' | 'remote';
   lastPush: { signature: string; atMs: number };
 }
 
@@ -128,6 +134,7 @@ export class StreamManager extends EventEmitter {
       degradedReasons: [],
       presetId: null,
       trackerResets: 0,
+      detectionSource: 'local',
       lastPush: { signature: '', atMs: 0 },
     };
 
@@ -252,7 +259,9 @@ export class StreamManager extends EventEmitter {
       }
       stream.status = 'ok';
       stream.degradedReasons = [];
-      const rawDets = await stream.detector.detect(frame);
+      const remote = isDetectionsFrame(frame);
+      stream.detectionSource = remote ? 'remote' : 'local';
+      const rawDets = remote ? (frame.detections ?? []) : await stream.detector.detect(frame);
       tracks = stream.tracker.update(rawDets, now);
     }
     stream.presetId = gate.presetId;
@@ -326,6 +335,7 @@ export class StreamManager extends EventEmitter {
     degradedReasons: GateReason[];
     presetId: number | null;
     trackerResets: number;
+    detectionSource: 'local' | 'remote';
   }> {
     const result = [];
     for (const [cameraId, s] of this.streams.entries()) {
@@ -343,6 +353,7 @@ export class StreamManager extends EventEmitter {
         degradedReasons: s.degradedReasons,
         presetId: s.presetId,
         trackerResets: s.trackerResets,
+        detectionSource: s.detectionSource,
       });
     }
     return result;
