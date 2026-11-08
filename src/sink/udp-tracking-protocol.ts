@@ -3,6 +3,8 @@ import type { BoundingBox2D, TrackedSubject } from '../types.js';
 export const TRACKING_MAGIC = 0x5054; // ASCII "PT" (Pi Tracking)
 export const TRACKING_VERSION = 1;
 export const TRACKING_TYPE_SNAPSHOT = 0x01;
+/** Flag bit: the camera's picture cannot be trusted now (moving, blurred, stale, frozen); an empty list means "unknown", not "nobody". */
+export const TRACKING_FLAG_DEGRADED = 0x0001;
 
 export interface ScreenTrackObject {
   trackId: number;
@@ -17,6 +19,8 @@ export interface ScreenTrackingPacket {
   sequence: number;
   timestampMs: number;
   cameraId: string;
+  /** Bit field, see TRACKING_FLAG_*. 0 when omitted. */
+  flags?: number | undefined;
   objects: ScreenTrackObject[];
 }
 
@@ -27,7 +31,7 @@ export interface ScreenTrackingPacket {
  * [0..1]   Magic 0x5054 ("PT")
  * [2]      Version (1)
  * [3]      Type (1 = Snapshot)
- * [4..5]   Flags (reserved 0x0000)
+ * [4..5]   Flags (UInt16BE; bit 0 = camera degraded, see TRACKING_FLAG_DEGRADED)
  * [6..9]   Sequence (UInt32BE)
  * [10..17] TimestampMs (BigUInt64BE)
  * [18]     CameraId length N (UInt8)
@@ -61,7 +65,7 @@ export function encodeTrackingPacket(packet: ScreenTrackingPacket): Buffer {
   offset += 1;
   buf.writeUInt8(TRACKING_TYPE_SNAPSHOT, offset);
   offset += 1;
-  buf.writeUInt16BE(0, offset); // flags
+  buf.writeUInt16BE((packet.flags ?? 0) & 0xffff, offset); // flags
   offset += 2;
   buf.writeUInt32BE(packet.sequence >>> 0, offset);
   offset += 4;
@@ -163,7 +167,8 @@ export function decodeTrackingPacket(buf: Buffer): ScreenTrackingPacket | null {
   offset += 1;
   if (type !== TRACKING_TYPE_SNAPSHOT) return null;
 
-  offset += 2; // skip flags
+  const flags = buf.readUInt16BE(offset);
+  offset += 2;
 
   const sequence = buf.readUInt32BE(offset);
   offset += 4;
@@ -224,6 +229,7 @@ export function decodeTrackingPacket(buf: Buffer): ScreenTrackingPacket | null {
   }
 
   return {
+    flags,
     sequence,
     timestampMs,
     cameraId,
@@ -236,9 +242,11 @@ export function trackedSubjectsToPacket(
   cameraId: string,
   sequence: number,
   subjects: TrackedSubject[],
-  timestampMs = Date.now()
+  timestampMs = Date.now(),
+  flags = 0
 ): ScreenTrackingPacket {
   return {
+    flags,
     sequence,
     timestampMs,
     cameraId,

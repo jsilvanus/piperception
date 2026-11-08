@@ -10,6 +10,12 @@ export interface PusherStats {
   lastError?: string | undefined;
 }
 
+export interface PushMeta {
+  status?: 'ok' | 'degraded';
+  reasons?: string[];
+  presetId?: number | null;
+}
+
 export class PiSpacePusher {
   readonly pispaceUrl: string;
   readonly pigatewayUrl?: string | undefined;
@@ -24,9 +30,16 @@ export class PiSpacePusher {
     this.pigatewayUrl = pigatewayUrl?.replace(/\/+$/, '');
   }
 
-  async pushDetections(cameraId: string, subjects: TrackedSubject[]): Promise<boolean> {
+  /**
+   * Pushes a camera's current tracks. An empty list is pushed too ("nobody there"); with
+   * status 'degraded' the list is empty because the picture cannot be trusted ("unknown").
+   */
+  async pushDetections(cameraId: string, subjects: TrackedSubject[], meta: PushMeta = {}): Promise<boolean> {
     const payload = {
       cameraId,
+      status: meta.status ?? 'ok',
+      ...(meta.reasons?.length ? { reasons: meta.reasons } : {}),
+      ...(meta.presetId !== undefined ? { presetId: meta.presetId } : {}),
       objects: subjects.map((s) => ({
         trackId: s.trackId,
         bbox: s.bbox,

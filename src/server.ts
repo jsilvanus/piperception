@@ -6,13 +6,24 @@ import type { PiSpacePusher } from './sink/pispace-pusher.js';
 import type { FeedManager } from './ingest/feed-manager.js';
 import type { UdpTrackingPublisher } from './sink/udp-tracking-publisher.js';
 import { SimulationDetector } from './detector/simulation-backend.js';
+import type { DetectorInfo } from './detector/select.js';
+import type { CameraContextClient } from './context/camera-context-client.js';
+import type { FrameHub } from './ingest/frame-hub.js';
+import type { Frame } from './ingest/frame.js';
+
+export interface ServerExtras {
+  detectorInfo?: DetectorInfo | undefined;
+  contextClient?: CameraContextClient | undefined;
+  hub?: FrameHub | undefined;
+}
 
 export function createServer(
   streamManager: StreamManager,
   pusher: PiSpacePusher,
   config: AppConfig,
   feedManager?: FeedManager,
-  udpPublisher?: UdpTrackingPublisher
+  udpPublisher?: UdpTrackingPublisher,
+  extras: ServerExtras = {}
 ): FastifyInstance {
   const app = fastify({ logger: false });
 
@@ -20,15 +31,42 @@ export function createServer(
 
   // Health check
   app.get('/health', async () => {
+    const streams = streamManager.getAllStreams();
+    const degraded = streams.filter((s) => s.status === 'degraded');
+    const detectorInfo = extras.detectorInfo ?? { name: 'stub', reason: 'no model configured' };
     return {
       ok: true,
       service: 'piperception',
       version: '0.1.0',
-      activeStreams: streamManager.getAllStreams().filter((s) => s.running).length,
+      // degraded: some camera cannot be analysed now, or real cameras run on the stub detector.
+      status: degraded.length || detectorInfo.name === 'stub' ? 'degraded' : 'ok',
+      detector: detectorInfo,
+      settings: streamManager.settings,
+      picam: extras.contextClient
+        ? { connected: extras.contextClient.isConnected, lastError: extras.contextClient.lastError ?? null }
+        : null,
+      cameras: Object.fromEntries(
+        streams.map((s) => [
+          s.cameraId,
+          { status: s.status, reasons: s.degradedReasons, presetId: s.presetId, detector: s.detector, tracks: s.trackCount },
+        ])
+      ),
+      frames: extras.hub?.stats() ?? null,
+      activeStreams: streams.filter((s) => s.running).length,
       activeFeeds: feedManager ? feedManager.getAllFeeds().filter((f) => f.status === 'active').length : 0,
       pispaceConnected: pusher.getStats().connected,
       udpTelemetry: udpPublisher?.getStats() ?? null,
     };
+  });
+
+  // Runtime settings (pauseWhileMoving: treat a moving camera as unknown, default true)
+  app.get('/api/v1/settings', async () => streamManager.settings);
+  app.put<{ Body: { pauseWhileMoving?: unknown } }>('/api/v1/settings', async (req, reply) => {
+    const body = req.body ?? {};
+    if (body.pauseWhileMoving !== undefined && typeof body.pauseWhileMoving !== 'boolean') {
+      return reply.code(400).send({ error: 'pauseWhileMoving must be a boolean' });
+    }
+    return streamManager.updateSettings(body as { pauseWhileMoving?: boolean });
   });
 
   // List all streams
@@ -184,11 +222,12 @@ export function createServer(
     Body: { frameBase64?: string; detections?: any[] };
   }>('/api/v1/cameras/:cameraId/frame', async (req, reply) => {
     const { cameraId } = req.params;
-    let frameBuf: Buffer | undefined;
+    let frame: Frame | undefined;
     if (req.body?.frameBase64) {
-      frameBuf = Buffer.from(req.body.frameBase64, 'base64');
+      // A posted frame is a JPEG; the detector reads its size from the file.
+      frame = { cameraId, tsMs: Date.now(), format: 'jpeg', width: 0, height: 0, data: Buffer.from(req.body.frameBase64, 'base64') };
     }
-    const result = await streamManager.processFrame(cameraId, frameBuf);
+    const result = await streamManager.processFrame(cameraId, frame);
     if (!result) {
       return reply.code(404).send({ error: `Camera stream ${cameraId} not found` });
     }

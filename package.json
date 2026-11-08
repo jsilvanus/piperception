@@ -20,7 +20,8 @@
   "dependencies": {
     "@fastify/cors": "^10.0.2",
     "fastify": "^5.2.1",
-    "fffleet": "file:..\\fffleet\\packages\\fffleet"
+    "fffleet": "^2.8.0",
+    "jpeg-js": "^0.4.4"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -38,5 +39,8 @@
     "port": 3202,
     "healthEndpoint": "/health",
     "envPortVar": "PORT"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.31.1"
   }
 }

@@ -37,13 +37,13 @@ export class UdpTrackingPublisher {
     return this.socket;
   }
 
-  sendTracks(cameraId: string, subjects: TrackedSubject[], timestampMs = Date.now()): boolean {
+  sendTracks(cameraId: string, subjects: TrackedSubject[], timestampMs = Date.now(), flags = 0): boolean {
     if (!this.enabled) return false;
 
     const seq = (this.sequences.get(cameraId) ?? 0) + 1;
     this.sequences.set(cameraId, seq);
 
-    const packet = trackedSubjectsToPacket(cameraId, seq, subjects, timestampMs);
+    const packet = trackedSubjectsToPacket(cameraId, seq, subjects, timestampMs, flags);
     const buf = encodeTrackingPacket(packet);
 
     try {

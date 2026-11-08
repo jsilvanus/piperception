@@ -10,6 +10,18 @@ import { SimulationDetector } from '../detector/simulation-backend.js';
 import { StubDetector } from '../detector/stub-backend.js';
 import { PiSpacePusher } from '../sink/pispace-pusher.js';
 import type { UdpTrackingPublisher } from '../sink/udp-tracking-publisher.js';
+import { TRACKING_FLAG_DEGRADED } from '../sink/udp-tracking-protocol.js';
+import type { Frame } from '../ingest/frame.js';
+import type { FrameConsumer } from '../ingest/frame-hub.js';
+import { assessCamera, type CameraView, type GateReason } from '../context/camera-context.js';
+
+export interface PerceptionSettings {
+  /** Treat a moving camera as unknown and pause tracking (runtime option, default on). */
+  pauseWhileMoving: boolean;
+}
+
+/** While nothing changes, an empty or degraded state is re-sent to PiSpace this often. */
+const EMPTY_PUSH_INTERVAL_MS = 2000;
 
 export interface CameraStreamState {
   config: CameraStreamConfig;
@@ -22,6 +34,12 @@ export interface CameraStreamState {
   actualFps: number;
   lastProcessingLatencyMs: number;
   activeTracks: TrackedSubject[];
+  /** ok: analysing; degraded: the camera context says the picture cannot be trusted. */
+  status: 'ok' | 'degraded';
+  degradedReasons: GateReason[];
+  presetId: number | null;
+  trackerResets: number;
+  lastPush: { signature: string; atMs: number };
 }
 
 export class StreamManager extends EventEmitter {
@@ -29,6 +47,9 @@ export class StreamManager extends EventEmitter {
   private pusher: PiSpacePusher | null = null;
   private udpPublisher: UdpTrackingPublisher | null = null;
   private autoPush = true;
+  private defaultDetector: DetectorBackend | null = null;
+  private contextSource: ((cameraId: string) => CameraView | null) | null = null;
+  readonly settings: PerceptionSettings = { pauseWhileMoving: true };
 
   constructor(pusher?: PiSpacePusher, autoPush = true, udpPublisher?: UdpTrackingPublisher) {
     super();
@@ -45,6 +66,35 @@ export class StreamManager extends EventEmitter {
     this.udpPublisher = publisher;
   }
 
+  /** Detector for real (non-simulation) cameras; existing real streams switch to it. */
+  setDefaultDetector(detector: DetectorBackend): void {
+    this.defaultDetector = detector;
+    for (const s of this.streams.values()) {
+      if (s.config.sourceType !== 'simulation') s.detector = detector;
+    }
+  }
+
+  /** Where camera context (picam) comes from. Without one, real cameras are never gated. */
+  setContextSource(source: ((cameraId: string) => CameraView | null) | null): void {
+    this.contextSource = source;
+  }
+
+  updateSettings(patch: Partial<PerceptionSettings>): PerceptionSettings {
+    if (typeof patch.pauseWhileMoving === 'boolean') this.settings.pauseWhileMoving = patch.pauseWhileMoving;
+    return { ...this.settings };
+  }
+
+  /** The person pipeline as a FrameHub consumer: every camera that has a stream here. */
+  asFrameConsumer(): FrameConsumer {
+    return {
+      name: 'person',
+      wants: (cameraId) => this.streams.has(cameraId),
+      handle: async (frame) => {
+        await this.processFrame(frame.cameraId, frame);
+      },
+    };
+  }
+
   /** Register and optionally start a camera stream */
   addStream(config: CameraStreamConfig, detector?: DetectorBackend): CameraStreamState {
     this.removeStream(config.cameraId);
@@ -55,7 +105,7 @@ export class StreamManager extends EventEmitter {
     } else if (config.sourceType === 'simulation') {
       streamDetector = new SimulationDetector(config.simulationPath ?? 'altar');
     } else {
-      streamDetector = new StubDetector();
+      streamDetector = this.defaultDetector ?? new StubDetector();
     }
 
     const tracker = new ByteTracker({
@@ -74,6 +124,11 @@ export class StreamManager extends EventEmitter {
       actualFps: 0,
       lastProcessingLatencyMs: 0,
       activeTracks: [],
+      status: 'ok',
+      degradedReasons: [],
+      presetId: null,
+      trackerResets: 0,
+      lastPush: { signature: '', atMs: 0 },
     };
 
     this.streams.set(config.cameraId, state);
@@ -135,9 +190,7 @@ export class StreamManager extends EventEmitter {
         }
 
         // Auto-push to PiSpace
-        if (this.autoPush && this.pusher && tracks.length > 0) {
-          this.pusher.pushDetections(cameraId, tracks).catch(() => {});
-        }
+        void this.maybePush(stream, tracks, now);
       } catch (err: any) {
         this.emit('error', { cameraId, error: err.message });
       }
@@ -163,15 +216,47 @@ export class StreamManager extends EventEmitter {
     return this.streams.delete(cameraId);
   }
 
-  /** Inject a single frame manually (e.g. from HTTP POST /cameras/:id/frame) */
-  async processFrame(cameraId: string, frameBuffer?: Buffer): Promise<CameraFrameDetection | null> {
+  /**
+   * Runs one frame through gating, detection and tracking. A real camera whose context says the picture
+   * cannot be trusted (stale, privacy blur, moving while pauseWhileMoving, frozen, picam unreachable) is
+   * not analysed: it reports status 'degraded' with an empty list, which means "unknown", not "nobody".
+   * The tracker is reset when analysis resumes and when the preset changes, so IDs do not jump across views.
+   */
+  async processFrame(cameraId: string, frame?: Frame | Buffer): Promise<CameraFrameDetection | null> {
     const stream = this.streams.get(cameraId);
     if (!stream) return null;
 
     const t0 = performance.now();
     const now = Date.now();
-    const rawDets = await stream.detector.detect(frameBuffer);
-    const tracks = stream.tracker.update(rawDets, now);
+
+    const gated = stream.config.sourceType !== 'simulation' && this.contextSource !== null;
+    const gate = gated
+      ? assessCamera(this.contextSource!(cameraId), { pauseWhileMoving: this.settings.pauseWhileMoving })
+      : { state: 'ok' as const, reasons: [] as GateReason[], presetId: null };
+
+    let tracks: TrackedSubject[];
+    if (gate.state === 'unknown') {
+      if (stream.status !== 'degraded') {
+        stream.tracker.reset();
+        stream.trackerResets++;
+      }
+      stream.status = 'degraded';
+      stream.degradedReasons = gate.reasons;
+      tracks = [];
+    } else {
+      // Entering 'degraded' already reset the tracker. A preset change without a reported move is
+      // still a different view, so reset then too.
+      if (stream.status === 'ok' && gated && gate.presetId !== stream.presetId) {
+        stream.tracker.reset();
+        stream.trackerResets++;
+      }
+      stream.status = 'ok';
+      stream.degradedReasons = [];
+      const rawDets = await stream.detector.detect(frame);
+      tracks = stream.tracker.update(rawDets, now);
+    }
+    stream.presetId = gate.presetId;
+
     stream.activeTracks = tracks;
     stream.frameIndex++;
     stream.lastFrameTimeMs = now;
@@ -182,6 +267,9 @@ export class StreamManager extends EventEmitter {
       timestamp: new Date().toISOString(),
       frameIndex: stream.frameIndex,
       processingTimeMs: stream.lastProcessingLatencyMs,
+      status: stream.status,
+      ...(stream.degradedReasons.length ? { reasons: stream.degradedReasons } : {}),
+      presetId: stream.presetId,
       objects: tracks.map((t) => ({
         trackId: t.trackId,
         bbox: t.bbox,
@@ -193,14 +281,31 @@ export class StreamManager extends EventEmitter {
     this.emit('detection', event);
 
     if (this.udpPublisher) {
-      this.udpPublisher.sendTracks(cameraId, tracks, now);
+      this.udpPublisher.sendTracks(cameraId, tracks, now, stream.status === 'degraded' ? TRACKING_FLAG_DEGRADED : 0);
     }
 
-    if (this.autoPush && this.pusher && tracks.length > 0) {
-      await this.pusher.pushDetections(cameraId, tracks);
-    }
+    await this.maybePush(stream, tracks, now);
 
     return event;
+  }
+
+  /** Tracks go to PiSpace on every frame; an empty or degraded state when it changes and then every 2 s. */
+  private async maybePush(stream: CameraStreamState, tracks: TrackedSubject[], now: number): Promise<void> {
+    if (!this.autoPush || !this.pusher) return;
+    const signature = `${stream.status}|${stream.degradedReasons.join(',')}|${stream.presetId}|${tracks.length}`;
+    const due =
+      tracks.length > 0 ||
+      signature !== stream.lastPush.signature ||
+      now - stream.lastPush.atMs >= EMPTY_PUSH_INTERVAL_MS;
+    if (!due) return;
+    stream.lastPush = { signature, atMs: now };
+    await this.pusher
+      .pushDetections(stream.config.cameraId, tracks, {
+        status: stream.status,
+        reasons: stream.degradedReasons,
+        presetId: stream.presetId,
+      })
+      .catch(() => false);
   }
 
   getStream(cameraId: string): CameraStreamState | undefined {
@@ -216,6 +321,11 @@ export class StreamManager extends EventEmitter {
     frameIndex: number;
     trackCount: number;
     activeTracks: TrackedSubject[];
+    detector: string;
+    status: 'ok' | 'degraded';
+    degradedReasons: GateReason[];
+    presetId: number | null;
+    trackerResets: number;
   }> {
     const result = [];
     for (const [cameraId, s] of this.streams.entries()) {
@@ -228,6 +338,11 @@ export class StreamManager extends EventEmitter {
         frameIndex: s.frameIndex,
         trackCount: s.activeTracks.length,
         activeTracks: s.activeTracks,
+        detector: s.detector.name,
+        status: s.status,
+        degradedReasons: s.degradedReasons,
+        presetId: s.presetId,
+        trackerResets: s.trackerResets,
       });
     }
     return result;
