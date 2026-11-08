@@ -36,6 +36,10 @@ export interface CameraFrameDetection {
   timestamp: string;
   frameIndex: number;
   processingTimeMs: number;
+  /** degraded: the camera picture cannot be trusted now; objects is empty and means "unknown". */
+  status?: 'ok' | 'degraded' | undefined;
+  reasons?: string[] | undefined;
+  presetId?: number | null | undefined;
   objects: Array<{
     trackId: number;
     bbox: BoundingBox2D;
@@ -52,9 +56,16 @@ export interface FeedConfig {
   sourceType: StreamSourceType;
   url?: string | undefined;
   fps?: number | undefined;
-  scale?: string | undefined;
+  /** Frame size the fleet job scales to (default 640x480). Raw frames are cut by this size. */
+  width?: number | undefined;
+  height?: number | undefined;
+  /** MJPEG quality for the MJPEG variant. */
   quality?: number | undefined;
   fleetUrl?: string | undefined;
+  /** fffleet worker IDs that send MJPEG instead of raw rgb24 (overrides PERCEPTION_MJPEG_WORKERS). */
+  mjpegWorkers?: string[] | undefined;
+  workerPreference?: string[] | undefined;
+  requires?: string[] | undefined;
   enabled?: boolean | undefined;
   confThreshold?: number | undefined;
   nmsThreshold?: number | undefined;
@@ -68,6 +79,9 @@ export interface FeedState {
   status: FeedStatus;
   framesIngested: number;
   lastFrameAtMs: number;
+  /** Frame format the running job sends (from its fffleet variant). */
+  format?: 'rgb24' | 'jpeg' | undefined;
+  variant?: string | null | undefined;
   lastError?: string | undefined;
 }
 
@@ -98,4 +112,16 @@ export interface AppConfig {
   udpGatewayPort?: number | undefined;
   udpGatewayEnabled?: boolean | undefined;
   streams: CameraStreamConfig[];
+  modelInputSize?: number | undefined;
+  modelChannelOrder?: 'bgr' | 'rgb' | undefined;
+  ortProviders?: string[] | undefined;
+  picamUrl?: string | undefined;
+  pauseWhileMoving?: boolean | undefined;
+  fffleetToken?: string | undefined;
+  fffleetClientId?: string | undefined;
+  fffleetClientSecret?: string | undefined;
+  mjpegWorkers?: string[] | undefined;
+  feedWorkerPreference?: string[] | undefined;
+  feedRequires?: string[] | undefined;
+  autostartFeeds?: boolean | undefined;
 }

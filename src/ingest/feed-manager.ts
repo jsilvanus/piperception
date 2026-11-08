@@ -1,12 +1,36 @@
 import { EventEmitter } from 'node:events';
 import { createFleet } from 'fffleet';
-import type { FeedConfig, FeedState, FeedStatus } from '../types.js';
+import type { FeedConfig, FeedState } from '../types.js';
 import type { StreamManager } from '../stream/stream-manager.js';
+import { FrameHub } from './frame-hub.js';
+import { MjpegSplitter, RawFrameSplitter, type FrameFormat } from './frame.js';
+import { buildFeedJobSpec, formatForVariant, sniffFormat, waitForVariant } from './fleet-feed-spec.js';
+
+/** The MediaMTX analysis streams are 640x480 at 5 fps; ask for exactly that. */
+export const DEFAULT_FEED_FPS = 5;
+export const DEFAULT_FEED_WIDTH = 640;
+export const DEFAULT_FEED_HEIGHT = 480;
+
+type FleetFactory = (opts: { url: string; token?: string; clientId?: string; clientSecret?: string }) => {
+  submit(spec: any): Promise<any>;
+};
 
 export interface FeedManagerOptions {
   mediaMtxRtspBaseUrl: string;
   mediaMtxRtmpBaseUrl?: string;
   fffleetUrl: string;
+  fffleetToken?: string | undefined;
+  fffleetClientId?: string | undefined;
+  fffleetClientSecret?: string | undefined;
+  /** Workers that send MJPEG instead of raw frames (default: none). */
+  mjpegWorkers?: string[] | undefined;
+  workerPreference?: string[] | undefined;
+  requires?: string[] | undefined;
+  /** Frames go here; a new hub is made when not given. */
+  hub?: FrameHub | undefined;
+  /** For tests: replaces fffleet's createFleet. */
+  fleetFactory?: FleetFactory | undefined;
+  placementTimeoutMs?: number | undefined;
 }
 
 interface ActiveIngestJob {
@@ -22,10 +46,29 @@ export class FeedManager extends EventEmitter {
   private readonly mediaMtxRtspBaseUrl: string;
   private readonly mediaMtxRtmpBaseUrl: string;
   private readonly fffleetUrl: string;
+  private readonly fleetAuth: { token?: string; clientId?: string; clientSecret?: string };
+  private readonly mjpegWorkers: string[];
+  private readonly workerPreference: string[] | undefined;
+  private readonly requires: string[] | undefined;
+  private readonly fleetFactory: FleetFactory;
+  private readonly placementTimeoutMs: number;
+  readonly hub: FrameHub;
 
   constructor(streamManager: StreamManager, options: FeedManagerOptions) {
     super();
     this.streamManager = streamManager;
+    this.hub = options.hub ?? new FrameHub();
+    this.fleetFactory = options.fleetFactory ?? (createFleet as unknown as FleetFactory);
+    this.fleetAuth = {
+      ...(options.fffleetToken ? { token: options.fffleetToken } : {}),
+      ...(options.fffleetClientId && options.fffleetClientSecret
+        ? { clientId: options.fffleetClientId, clientSecret: options.fffleetClientSecret }
+        : {}),
+    };
+    this.mjpegWorkers = options.mjpegWorkers ?? [];
+    this.workerPreference = options.workerPreference;
+    this.requires = options.requires;
+    this.placementTimeoutMs = options.placementTimeoutMs ?? 5000;
     this.mediaMtxRtspBaseUrl = options.mediaMtxRtspBaseUrl.replace(/\/+$/, '');
     this.mediaMtxRtmpBaseUrl = (options.mediaMtxRtmpBaseUrl ?? 'rtmp://127.0.0.1:1935').replace(/\/+$/, '');
     this.fffleetUrl = options.fffleetUrl;
@@ -55,8 +98,9 @@ export class FeedManager extends EventEmitter {
 
     const state: FeedState = {
       config: {
-        fps: 10,
-        scale: '640:-1',
+        fps: DEFAULT_FEED_FPS,
+        width: DEFAULT_FEED_WIDTH,
+        height: DEFAULT_FEED_HEIGHT,
         quality: 3,
         enabled: true,
         ...config,
@@ -74,7 +118,7 @@ export class FeedManager extends EventEmitter {
         cameraId: config.cameraId,
         name: config.name ?? config.cameraId,
         sourceType: config.sourceType === 'simulation' ? 'simulation' : 'rtsp',
-        fps: config.fps ?? 10,
+        fps: config.fps ?? DEFAULT_FEED_FPS,
         enabled: false,
         confThreshold: config.confThreshold ?? 0.45,
         nmsThreshold: config.nmsThreshold ?? 0.25,
@@ -108,11 +152,12 @@ export class FeedManager extends EventEmitter {
       return false;
     }
 
-    // MediaMTX / RTSP / RTMP ingestion using ff-fleet
+    // MediaMTX / RTSP / RTMP ingestion as an fffleet stream job
     const streamUrl = this.resolveFeedUrl(feed.config);
     const fleetUrl = feed.config.fleetUrl ?? this.fffleetUrl;
-    const fps = feed.config.fps ?? 10;
-    const scale = feed.config.scale ?? '640:-1';
+    const fps = feed.config.fps ?? DEFAULT_FEED_FPS;
+    const width = feed.config.width ?? DEFAULT_FEED_WIDTH;
+    const height = feed.config.height ?? DEFAULT_FEED_HEIGHT;
     const quality = feed.config.quality ?? 3;
 
     const controller = new AbortController();
@@ -124,24 +169,19 @@ export class FeedManager extends EventEmitter {
     this.activeJobs.set(cameraId, activeJob);
 
     try {
-      const fleet = createFleet({ url: fleetUrl });
-      const job = await fleet.submit({
-        kind: 'stream',
-        class: 'stream',
-        stdout: true,
-        inputs: [{ name: 'src', uri: streamUrl }],
-        ffmpeg: {
-          args: [
-            '-rtsp_transport', 'tcp',
-            '-i', '{{input:src}}',
-            '-vf', `fps=${fps},scale=${scale}`,
-            '-q:v', String(quality),
-            '-f', 'image2pipe',
-            '-vcodec', 'mjpeg',
-            'pipe:1',
-          ],
-        },
-      });
+      const fleet = this.fleetFactory({ url: fleetUrl, ...this.fleetAuth });
+      const job = await fleet.submit(
+        buildFeedJobSpec({
+          streamUrl,
+          fps,
+          width,
+          height,
+          quality,
+          mjpegWorkers: feed.config.mjpegWorkers ?? this.mjpegWorkers,
+          workerPreference: feed.config.workerPreference ?? this.workerPreference,
+          requires: feed.config.requires ?? this.requires,
+        })
+      );
 
       activeJob.job = job;
 
@@ -160,7 +200,7 @@ export class FeedManager extends EventEmitter {
       this.emit('feed:status', { cameraId, status: feed.status, jobId: job.id });
 
       // Start reader loop asynchronously
-      this.consumeMjpegStream(cameraId, job, activeJob).catch((err) => {
+      this.consumeStdout(cameraId, job, activeJob, width, height).catch((err) => {
         if (!activeJob.stopped) {
           feed.status = 'error';
           feed.lastError = err.message;
@@ -178,70 +218,57 @@ export class FeedManager extends EventEmitter {
     }
   }
 
-  private async consumeMjpegStream(
+  /**
+   * Reads the job's stdout and publishes frames to the hub. The bytes are rawvideo rgb24 or MJPEG
+   * depending on the spec variant fffleet chose for the worker, so the variant is read first.
+   */
+  private async consumeStdout(
     cameraId: string,
     job: any,
-    activeJob: ActiveIngestJob
+    activeJob: ActiveIngestJob,
+    width: number,
+    height: number
   ): Promise<void> {
     const feed = this.feeds.get(cameraId);
-    let chunkStream: NodeJS.ReadableStream;
+    let chunkStream: AsyncIterable<Buffer>;
     try {
       chunkStream = await job.stdout();
     } catch (err: any) {
       if (!activeJob.stopped) {
-        throw new Error(`Failed to attach stdout to ff-fleet job: ${err.message}`);
+        throw new Error(`Failed to attach stdout to fffleet job: ${err.message}`);
       }
       return;
     }
 
-    let buffer = Buffer.alloc(0);
-    const SOI = Buffer.from([0xff, 0xd8]); // JPEG Start of Image
-    const EOI = Buffer.from([0xff, 0xd9]); // JPEG End of Image
+    const variant = await waitForVariant(job, this.placementTimeoutMs);
+    let format: FrameFormat | null = variant === undefined ? null : formatForVariant(variant);
+    let split: ((chunk: Buffer) => Buffer[]) | null = null;
+    const choose = (fmt: FrameFormat) => {
+      format = fmt;
+      if (feed) {
+        feed.format = fmt;
+        feed.variant = variant ?? null;
+      }
+      if (fmt === 'jpeg') {
+        const s = new MjpegSplitter();
+        split = (c) => s.push(c);
+      } else {
+        const s = new RawFrameSplitter(width, height);
+        split = (c) => s.push(c);
+      }
+    };
+    if (format) choose(format);
 
     for await (const chunk of chunkStream) {
       if (activeJob.stopped) break;
-
-      buffer = Buffer.concat([buffer, chunk as Buffer]);
-
-      // Scan for JPEG frames in buffer
-      while (true) {
-        const soiIdx = buffer.indexOf(SOI);
-        if (soiIdx === -1) {
-          // No start marker found, keep only last byte in case SOI is split
-          if (buffer.length > 1) {
-            buffer = buffer.subarray(buffer.length - 1);
-          }
-          break;
-        }
-
-        const eoiIdx = buffer.indexOf(EOI, soiIdx + 2);
-        if (eoiIdx === -1) {
-          // Incomplete frame, slide buffer to soiIdx if leading junk exists
-          if (soiIdx > 0) {
-            buffer = buffer.subarray(soiIdx);
-          }
-          // Prevent buffer from growing unbounded
-          if (buffer.length > 5 * 1024 * 1024) {
-            buffer = Buffer.alloc(0);
-          }
-          break;
-        }
-
-        // Full JPEG frame extracted
-        const frameBuf = buffer.subarray(soiIdx, eoiIdx + 2);
-        buffer = buffer.subarray(eoiIdx + 2);
-
+      if (!split) choose(sniffFormat(chunk as Buffer));
+      for (const data of split!(chunk as Buffer)) {
+        const now = Date.now();
         if (feed) {
           feed.framesIngested++;
-          feed.lastFrameAtMs = Date.now();
+          feed.lastFrameAtMs = now;
         }
-
-        // Feed directly into ByteTrack & detection engine
-        try {
-          await this.streamManager.processFrame(cameraId, frameBuf);
-        } catch {
-          // Frame processing failure ignored per-frame
-        }
+        this.hub.publish({ cameraId, tsMs: now, format: format!, width, height, data });
       }
     }
 

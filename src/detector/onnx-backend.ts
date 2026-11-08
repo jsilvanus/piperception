@@ -5,15 +5,26 @@ import {
   anchorCount,
   decodeYoloxCandidates,
   nms,
-  candidateToNormalized,
   COCO_PERSON_CLASS,
 } from './yolox-decoder.js';
+import type { Frame } from '../ingest/frame.js';
+import { frameToRgb, letterbox, unletterbox } from '../preprocess/yolox-input.js';
+
+function isFrame(v: unknown): v is Frame {
+  return !!v && typeof v === 'object' && Buffer.isBuffer((v as Frame).data) && typeof (v as Frame).format === 'string';
+}
 
 export interface OnnxDetectorOptions {
   modelPath: string;
   inputSize?: number | undefined;
   confThreshold?: number | undefined;
   nmsThreshold?: number | undefined;
+  /** Channel order the model was trained with (official YOLOX: bgr). */
+  channelOrder?: 'bgr' | 'rgb' | undefined;
+  /** The model was exported with the box decode inside (--decode_in_inference). */
+  decodedOutput?: boolean | undefined;
+  /** onnxruntime execution providers, e.g. ['cuda', 'cpu']. Default ['cpu']. */
+  executionProviders?: string[] | undefined;
 }
 
 export class OnnxDetector implements DetectorBackend {
@@ -24,12 +35,18 @@ export class OnnxDetector implements DetectorBackend {
   private readonly inputSize: number;
   private readonly confThreshold: number;
   private readonly nmsThreshold: number;
+  private readonly channelOrder: 'bgr' | 'rgb';
+  private readonly decodedOutput: boolean;
+  private readonly executionProviders: string[];
 
   constructor(options: OnnxDetectorOptions) {
     this.modelPath = options.modelPath;
     this.inputSize = options.inputSize ?? 416;
     this.confThreshold = options.confThreshold ?? 0.35;
     this.nmsThreshold = options.nmsThreshold ?? 0.45;
+    this.channelOrder = options.channelOrder ?? 'bgr';
+    this.decodedOutput = options.decodedOutput ?? false;
+    this.executionProviders = options.executionProviders ?? ['cpu'];
   }
 
   async init(): Promise<void> {
@@ -41,33 +58,32 @@ export class OnnxDetector implements DetectorBackend {
       // @ts-ignore - optional dynamic runtime dependency
       this.ort = await import('onnxruntime-node');
     } catch (err: any) {
-      throw new Error(`onnxruntime-node is not installed (${err.message}). Run: npm install onnxruntime-node`);
+      throw new Error(`onnxruntime-node is not installed (${err.message}). Run: pnpm add onnxruntime-node`);
     }
 
     const runtime = this.ort.default ?? this.ort;
     this.session = await runtime.InferenceSession.create(this.modelPath, {
-      executionProviders: ['cpu'],
+      executionProviders: this.executionProviders,
       graphOptimizationLevel: 'all',
     });
   }
 
-  async detect(frame?: Buffer | unknown): Promise<RawDetection[]> {
+  async detect(frame?: Frame | Buffer | unknown): Promise<RawDetection[]> {
+    if (!isFrame(frame)) {
+      // A bare buffer carries no size or format; nothing honest can be detected from it.
+      return [];
+    }
     if (!this.session) {
       await this.init();
     }
 
-    if (!frame || !Buffer.isBuffer(frame)) {
-      return [];
-    }
+    const rgb = frameToRgb(frame);
+    const { tensor: input, ratio } = letterbox(rgb, this.inputSize, { channelOrder: this.channelOrder });
 
-    // Tensor inference
     const runtime = this.ort.default ?? this.ort;
     const inputName = this.session.inputNames[0];
     const outputName = this.session.outputNames[0];
-
-    // Placeholder for actual image buffer tensor (NCHW float32)
-    const floatData = new Float32Array(3 * this.inputSize * this.inputSize);
-    const tensor = new runtime.Tensor('float32', floatData, [1, 3, this.inputSize, this.inputSize]);
+    const tensor = new runtime.Tensor('float32', input, [1, 3, this.inputSize, this.inputSize]);
 
     const results = await this.session.run({ [inputName]: tensor });
     const output = results[outputName];
@@ -82,11 +98,12 @@ export class OnnxDetector implements DetectorBackend {
       classes: cols - 5,
       targetClassIndex: COCO_PERSON_CLASS,
       minScore: this.confThreshold,
-      decode: anchors === expectedAnchors,
+      // Raw head output (the official export) needs the grid decode; an export with decode built in does not.
+      decode: anchors === expectedAnchors && !this.decodedOutput,
     });
 
     const kept = nms(candidates, this.nmsThreshold);
-    return kept.map((c) => candidateToNormalized(c, this.inputSize, this.inputSize));
+    return kept.map((c) => unletterbox(c, ratio, rgb.width, rgb.height));
   }
 
   async close(): Promise<void> {
