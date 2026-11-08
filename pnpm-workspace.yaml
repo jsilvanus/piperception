@@ -1,4 +1,6 @@
 allowBuilds:
   esbuild: true
+  # CPU binaries ship in the package; the install script only fetches CUDA libraries.
+  onnxruntime-node: false
 minimumReleaseAgeExclude:
   - fffleet@2.8.0
