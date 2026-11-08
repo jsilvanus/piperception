@@ -1,11 +1,21 @@
+import type { RawDetection } from '../types.js';
+
 /** One decoded or encoded video frame handed from a feed to the detectors. */
 export type FrameFormat = 'rgb24' | 'jpeg';
+
+/**
+ * `detections`: no picture, the detections a remote fffleet worker already made for this moment
+ * (see fleet/detect-protocol.ts). Detectors are skipped for such a frame; gating and tracking still run.
+ */
+export type HubFrameFormat = FrameFormat | 'detections';
 
 export interface Frame {
   cameraId: string;
   /** Wall-clock time the frame was cut from the feed (ms). */
   tsMs: number;
-  format: FrameFormat;
+  format: HubFrameFormat;
+  /** Set when format is 'detections' (normalised rects, persons only). */
+  detections?: RawDetection[] | undefined;
   /** Pixel size. For jpeg it is the requested feed size; the decoder reads the real size from the file. */
   width: number;
   height: number;

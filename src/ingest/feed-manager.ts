@@ -5,6 +5,15 @@ import type { StreamManager } from '../stream/stream-manager.js';
 import { FrameHub } from './frame-hub.js';
 import { MjpegSplitter, RawFrameSplitter, type FrameFormat } from './frame.js';
 import { buildFeedJobSpec, formatForVariant, sniffFormat, waitForVariant } from './fleet-feed-spec.js';
+import {
+  DETECT_JOB_TYPE,
+  DEFAULT_REMOTE_MODEL,
+  DetectLineReader,
+  buildDetectJobSpec,
+  frameLineDetections,
+} from '../fleet/detect-protocol.js';
+
+const EMPTY = Buffer.alloc(0);
 
 /** The MediaMTX analysis streams are 640x480 at 5 fps; ask for exactly that. */
 export const DEFAULT_FEED_FPS = 5;
@@ -13,7 +22,34 @@ export const DEFAULT_FEED_HEIGHT = 480;
 
 type FleetFactory = (opts: { url: string; token?: string; clientId?: string; clientSecret?: string }) => {
   submit(spec: any): Promise<any>;
+  capabilities?(): Promise<Record<string, unknown>>;
 };
+
+/**
+ * Remote detection: when a fleet worker offers job type `perception-detect` (e.g. the operator PC), the
+ * camera is read and analysed there and only detections come back. Otherwise, or when that job fails,
+ * the camera falls back to the local feed (frames to this process, detection here).
+ */
+export interface RemoteDetectOptions {
+  /** auto (default): use a remote worker when one is there; off: always local. */
+  mode?: 'auto' | 'off' | undefined;
+  model?: string | undefined;
+  inputSize?: number | undefined;
+  channelOrder?: 'bgr' | 'rgb' | undefined;
+  workerPreference?: string[] | undefined;
+  requires?: string[] | undefined;
+  /** How often local cameras look for a remote worker again (default 30 s). */
+  checkIntervalMs?: number | undefined;
+  /** A remote job not placed on a worker within this time is cancelled (default 10 s). */
+  placementTimeoutMs?: number | undefined;
+  /** Longest wait before trying remote again after failures (default 5 min). */
+  maxBackoffMs?: number | undefined;
+}
+
+interface RemoteState {
+  failures: number;
+  nextTryAtMs: number;
+}
 
 export interface FeedManagerOptions {
   mediaMtxRtspBaseUrl: string;
@@ -31,6 +67,11 @@ export interface FeedManagerOptions {
   /** For tests: replaces fffleet's createFleet. */
   fleetFactory?: FleetFactory | undefined;
   placementTimeoutMs?: number | undefined;
+  remote?: RemoteDetectOptions | undefined;
+  /** Cap on the frame rate of the local feed (detection in this process), e.g. 1 on a Pi. */
+  localFps?: number | undefined;
+  /** For tests: clock. */
+  now?: (() => number) | undefined;
 }
 
 interface ActiveIngestJob {
@@ -42,6 +83,14 @@ interface ActiveIngestJob {
 export class FeedManager extends EventEmitter {
   private feeds = new Map<string, FeedState>();
   private activeJobs = new Map<string, ActiveIngestJob>();
+  private remoteJobs = new Map<string, ActiveIngestJob>();
+  private remoteState = new Map<string, RemoteState>();
+  private remoteTimer: NodeJS.Timeout | null = null;
+  private capsCache: { atMs: number; available: boolean } | null = null;
+  private readonly remote: Required<Omit<RemoteDetectOptions, 'workerPreference' | 'requires'>> &
+    Pick<RemoteDetectOptions, 'workerPreference' | 'requires'>;
+  private readonly now: () => number;
+  private readonly localFps: number | undefined;
   private readonly streamManager: StreamManager;
   private readonly mediaMtxRtspBaseUrl: string;
   private readonly mediaMtxRtmpBaseUrl: string;
@@ -72,6 +121,20 @@ export class FeedManager extends EventEmitter {
     this.mediaMtxRtspBaseUrl = options.mediaMtxRtspBaseUrl.replace(/\/+$/, '');
     this.mediaMtxRtmpBaseUrl = (options.mediaMtxRtmpBaseUrl ?? 'rtmp://127.0.0.1:1935').replace(/\/+$/, '');
     this.fffleetUrl = options.fffleetUrl;
+    this.now = options.now ?? Date.now;
+    this.localFps = options.localFps && options.localFps > 0 ? options.localFps : undefined;
+    const r = options.remote ?? {};
+    this.remote = {
+      mode: r.mode ?? 'off',
+      model: r.model ?? DEFAULT_REMOTE_MODEL,
+      inputSize: r.inputSize ?? 416,
+      channelOrder: r.channelOrder ?? 'bgr',
+      workerPreference: r.workerPreference,
+      requires: r.requires,
+      checkIntervalMs: r.checkIntervalMs ?? 30_000,
+      placementTimeoutMs: r.placementTimeoutMs ?? 10_000,
+      maxBackoffMs: r.maxBackoffMs ?? 300_000,
+    };
   }
 
   /**
@@ -152,10 +215,24 @@ export class FeedManager extends EventEmitter {
       return false;
     }
 
+    this.ensureRemoteWatch();
+    if (await this.shouldTryRemote(cameraId)) {
+      if (await this.startRemote(cameraId)) return true;
+    }
+    return this.startLocal(cameraId);
+  }
+
+  /** Local feed: an fffleet stream job sends frames here, the detector of this process analyses them. */
+  private async startLocal(cameraId: string): Promise<boolean> {
+    const feed = this.feeds.get(cameraId);
+    if (!feed) return false;
+    if (this.activeJobs.has(cameraId)) return true;
+    feed.detection = 'local';
     // MediaMTX / RTSP / RTMP ingestion as an fffleet stream job
     const streamUrl = this.resolveFeedUrl(feed.config);
     const fleetUrl = feed.config.fleetUrl ?? this.fffleetUrl;
-    const fps = feed.config.fps ?? DEFAULT_FEED_FPS;
+    const wantedFps = feed.config.fps ?? DEFAULT_FEED_FPS;
+    const fps = this.localFps ? Math.min(wantedFps, this.localFps) : wantedFps;
     const width = feed.config.width ?? DEFAULT_FEED_WIDTH;
     const height = feed.config.height ?? DEFAULT_FEED_HEIGHT;
     const quality = feed.config.quality ?? 3;
@@ -201,7 +278,7 @@ export class FeedManager extends EventEmitter {
 
       // Start reader loop asynchronously
       this.consumeStdout(cameraId, job, activeJob, width, height).catch((err) => {
-        if (!activeJob.stopped) {
+        if (!activeJob.stopped && this.activeJobs.get(cameraId) === activeJob) {
           feed.status = 'error';
           feed.lastError = err.message;
           this.emit('feed:status', { cameraId, status: feed.status, error: err.message });
@@ -210,11 +287,184 @@ export class FeedManager extends EventEmitter {
 
       return true;
     } catch (err: any) {
+      if (activeJob.stopped) return false;
       feed.status = 'error';
       feed.lastError = err.message;
       this.activeJobs.delete(cameraId);
       this.emit('feed:status', { cameraId, status: feed.status, error: err.message });
       return false;
+    }
+  }
+
+  // ---------------------------------------------------------------- remote detection
+
+  /** Whether some worker of the fleet runs the `perception-detect` executor (cached 5 s). */
+  async remoteAvailable(): Promise<boolean> {
+    if (this.remote.mode === 'off') return false;
+    const now = this.now();
+    if (this.capsCache && now - this.capsCache.atMs < 5000) return this.capsCache.available;
+    let available = false;
+    try {
+      const fleet = this.fleetFactory({ url: this.fffleetUrl, ...this.fleetAuth });
+      const caps = (await fleet.capabilities?.()) ?? {};
+      const list = Array.isArray((caps as any).capabilities) ? ((caps as any).capabilities as unknown[]) : [];
+      available = list.includes(`type:${DETECT_JOB_TYPE}`);
+    } catch {
+      available = false;
+    }
+    this.capsCache = { atMs: now, available };
+    return available;
+  }
+
+  private async shouldTryRemote(cameraId: string): Promise<boolean> {
+    const feed = this.feeds.get(cameraId);
+    if (!feed || feed.config.sourceType === 'simulation' || this.remote.mode === 'off') return false;
+    if (feed.config.remoteDetect === false) return false;
+    const st = this.remoteState.get(cameraId);
+    if (st && this.now() < st.nextTryAtMs) return false;
+    return this.remoteAvailable();
+  }
+
+  private remoteFailed(cameraId: string, reason: string): void {
+    const st = this.remoteState.get(cameraId) ?? { failures: 0, nextTryAtMs: 0 };
+    st.failures++;
+    const wait = Math.min(this.remote.maxBackoffMs, this.remote.checkIntervalMs * 2 ** (st.failures - 1));
+    st.nextTryAtMs = this.now() + wait;
+    this.remoteState.set(cameraId, st);
+    const feed = this.feeds.get(cameraId);
+    if (feed) feed.remoteError = reason;
+    this.capsCache = null;
+    this.emit('feed:remote', { cameraId, state: 'failed', error: reason, retryInMs: wait });
+  }
+
+  /**
+   * Starts a `perception-detect` job for the camera. Returns false (and the caller stays or goes local)
+   * when it is not placed within placementTimeoutMs or cannot be submitted. Once it runs, a running local
+   * job of the camera is stopped; when the remote job ends, the camera goes back to the local feed.
+   */
+  private async startRemote(cameraId: string): Promise<boolean> {
+    const feed = this.feeds.get(cameraId);
+    if (!feed) return false;
+    if (this.remoteJobs.has(cameraId)) return true;
+    const active: ActiveIngestJob = { job: null, controller: new AbortController(), stopped: false };
+    this.remoteJobs.set(cameraId, active);
+    const spec = buildDetectJobSpec({
+      cameraId,
+      streamUrl: this.resolveFeedUrl(feed.config),
+      fps: feed.config.fps ?? DEFAULT_FEED_FPS,
+      width: feed.config.width ?? DEFAULT_FEED_WIDTH,
+      height: feed.config.height ?? DEFAULT_FEED_HEIGHT,
+      model: this.remote.model,
+      inputSize: this.remote.inputSize,
+      channelOrder: this.remote.channelOrder,
+      confThreshold: feed.config.confThreshold,
+      nmsThreshold: feed.config.nmsThreshold,
+      workerPreference: this.remote.workerPreference,
+      requires: this.remote.requires,
+    });
+    try {
+      const fleet = this.fleetFactory({ url: feed.config.fleetUrl ?? this.fffleetUrl, ...this.fleetAuth });
+      const job = await fleet.submit(spec);
+      active.job = job;
+      const placed = await waitForVariant(job, this.remote.placementTimeoutMs);
+      if (placed === undefined) {
+        throw new Error(`no worker took the detection job within ${this.remote.placementTimeoutMs} ms`);
+      }
+      if (active.stopped) return false;
+      const stdout = await job.stdout();
+      feed.detection = 'remote';
+      feed.remoteJobId = job.id;
+      feed.remoteWorker = job.workerId ?? job.snapshot?.workerId ?? null;
+      feed.remoteError = undefined;
+      feed.status = 'active';
+      this.remoteState.delete(cameraId);
+      this.emit('feed:remote', { cameraId, state: 'running', jobId: job.id });
+      this.emit('feed:status', { cameraId, status: feed.status, jobId: job.id, detection: 'remote' });
+      await this.stopLocal(cameraId);
+      void this.consumeRemote(cameraId, stdout, active);
+      return true;
+    } catch (err: any) {
+      this.remoteJobs.delete(cameraId);
+      if (active.job?.cancel) await active.job.cancel().catch(() => undefined);
+      if (!active.stopped) this.remoteFailed(cameraId, err?.message ?? String(err));
+      return false;
+    }
+  }
+
+  private async consumeRemote(cameraId: string, stdout: AsyncIterable<Buffer>, active: ActiveIngestJob): Promise<void> {
+    const feed = this.feeds.get(cameraId);
+    const reader = new DetectLineReader();
+    const width = feed?.config.width ?? DEFAULT_FEED_WIDTH;
+    const height = feed?.config.height ?? DEFAULT_FEED_HEIGHT;
+    let error: string | undefined;
+    try {
+      for await (const chunk of stdout) {
+        if (active.stopped) break;
+        for (const line of reader.push(chunk as Buffer)) {
+          if (line.type === 'hello') {
+            if (feed) feed.remoteModel = line.model;
+            continue;
+          }
+          const now = this.now();
+          if (feed) {
+            feed.framesIngested++;
+            feed.lastFrameAtMs = now;
+            feed.remoteInferenceMs = line.ms;
+          }
+          this.hub.publish({ cameraId, tsMs: now, format: 'detections', width, height, data: EMPTY, detections: frameLineDetections(line) });
+        }
+      }
+    } catch (err: any) {
+      error = err?.message ?? String(err);
+    }
+    if (active.stopped || this.remoteJobs.get(cameraId) !== active) return;
+    this.remoteJobs.delete(cameraId);
+    const snap = active.job?.snapshot;
+    const reason = error ?? snap?.error?.message ?? `remote detection job ended (${snap?.state ?? active.job?.state ?? 'unknown'})`;
+    this.remoteFailed(cameraId, reason);
+    if (feed) {
+      feed.detection = 'local';
+      feed.remoteJobId = undefined;
+      feed.remoteWorker = undefined;
+    }
+    // Fall back to the local feed straight away.
+    if (feed && feed.status !== 'stopped') await this.startLocal(cameraId);
+  }
+
+  private async stopLocal(cameraId: string): Promise<void> {
+    const activeJob = this.activeJobs.get(cameraId);
+    if (!activeJob) return;
+    activeJob.stopped = true;
+    activeJob.controller.abort();
+    this.activeJobs.delete(cameraId);
+    if (activeJob.job && typeof activeJob.job.cancel === 'function') {
+      await activeJob.job.cancel().catch(() => undefined);
+    }
+  }
+
+  private async stopRemote(cameraId: string): Promise<void> {
+    const active = this.remoteJobs.get(cameraId);
+    if (!active) return;
+    active.stopped = true;
+    active.controller.abort();
+    this.remoteJobs.delete(cameraId);
+    if (active.job && typeof active.job.cancel === 'function') {
+      await active.job.cancel().catch(() => undefined);
+    }
+  }
+
+  /** Every checkIntervalMs: cameras on the local feed move to a remote worker when one has come up. */
+  private ensureRemoteWatch(): void {
+    if (this.remoteTimer || this.remote.mode === 'off') return;
+    this.remoteTimer = setInterval(() => void this.checkRemote(), this.remote.checkIntervalMs);
+    this.remoteTimer.unref?.();
+  }
+
+  /** One pass of the remote watch (public for tests). */
+  async checkRemote(): Promise<void> {
+    for (const [cameraId, feed] of this.feeds) {
+      if (feed.status !== 'active' || feed.detection === 'remote' || this.remoteJobs.has(cameraId)) continue;
+      if (await this.shouldTryRemote(cameraId)) await this.startRemote(cameraId);
     }
   }
 
@@ -282,19 +532,12 @@ export class FeedManager extends EventEmitter {
     const feed = this.feeds.get(cameraId);
     if (!feed) return false;
 
-    const activeJob = this.activeJobs.get(cameraId);
-    if (activeJob) {
-      activeJob.stopped = true;
-      activeJob.controller.abort();
-      if (activeJob.job && typeof activeJob.job.cancel === 'function') {
-        try {
-          await activeJob.job.cancel();
-        } catch {
-          // ignore cancel error
-        }
-      }
-      this.activeJobs.delete(cameraId);
-    }
+    feed.status = 'stopped';
+    await this.stopRemote(cameraId);
+    await this.stopLocal(cameraId);
+    feed.detection = undefined;
+    feed.remoteJobId = undefined;
+    feed.remoteWorker = undefined;
 
     if (feed.config.sourceType === 'simulation') {
       this.streamManager.stopStream(cameraId);
@@ -316,6 +559,8 @@ export class FeedManager extends EventEmitter {
   }
 
   async stopAll(): Promise<void> {
+    if (this.remoteTimer) clearInterval(this.remoteTimer);
+    this.remoteTimer = null;
     for (const id of this.feeds.keys()) {
       await this.stopFeed(id);
     }

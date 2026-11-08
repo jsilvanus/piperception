@@ -85,6 +85,28 @@ Models (download outside the repo, e.g. into `/home/pi/apps/models/`):
 | `PERCEPTION_FEED_WORKERS` | unset | fffleet `workerPreference` for the feed jobs |
 | `PERCEPTION_FEED_REQUIRES` | unset | fffleet `requires`, e.g. `net:mediamtx` |
 
+### Remote detection (operator PC), Pi as fallback
+
+On a Pi 4, YOLOX-nano takes about 200-310 ms per 640x480 frame and the Pi throttles within seconds, so two cameras only get about 1 fps each there. A stronger machine runs detection instead, through fffleet:
+
+- **Executor.** `dist/fleet/detect-executor.js` is an fffleet executor for job type **`perception-detect`** (a stream job, `stdout: true`). On the worker, ffmpeg reads the camera stream (`rtsp`, `rtmp`, `srt`, `http(s)` only) at the requested size and rate, YOLOX runs on the newest frame whenever it is free (frames in between are dropped, nothing queues), and the job writes one NDJSON line per analysed frame: `{"v":1,"type":"frame","ts":…,"ms":…,"d":[[x,y,w,h,score],…]}` (normalised, persons only), after a first `hello` line with the model and providers. No frames travel back, only these lines. The worker picks the model file `<model>.onnx` from `PERCEPTION_MODEL_DIR`; the job names only the model (`yolox_tiny` by default), never a path. One onnxruntime session per model is shared by the jobs of a worker and runs one frame at a time.
+- **Worker image.** `docker/detect-worker.Dockerfile` = Node 24 + ffmpeg + onnxruntime (CPU) + `fffleet-worker` 2.8.0 + the executor + YOLOX nano and tiny (official release 0.1.1rc0, hash-checked). CI builds and smoke-tests it on every PR and pushes `ghcr.io/jsilvanus/piperception-detect-worker` from main. The operator PC compose in piecosystem runs it. CPU on purpose: the GPU of the operator PC is shared with speech-to-text and Ollama, and tiny on a laptop CPU is about 30-40 ms per frame.
+- **Choice and fallback (piperception).** With `PERCEPTION_REMOTE_DETECT=auto` (default) a camera feed first checks the orchestrator's `/v1/capabilities` for `type:perception-detect`. If a worker offers it, the camera gets a `perception-detect` job; once it runs, a local feed of that camera is stopped. If no worker takes it within 10 s, or the job ends (operator PC switched off, network gone), the camera goes back to the local feed at once (frames here, detection here, rate capped by `PERCEPTION_LOCAL_FPS`, default 1). Every `PERCEPTION_REMOTE_CHECK_MS` (30 s) local cameras look for a remote worker again, with back-off after failures (30 s doubling to 5 min). The detections from the remote job go through the same picam gating, ByteTrack, PiSpace push and UDP output as local ones. `/api/v1/feeds` shows per camera `detection` (`local`/`remote`), `remoteWorker`, `remoteModel`, `remoteInferenceMs` and `remoteError`; `/api/v1/streams` shows `detectionSource`.
+
+Checked in a cloud container on 2026-11-08 with a real fffleet 2.8.0 orchestrator and worker (the executor loaded through `FFFLEET_EXECUTORS`) and an HTTP video of a street photo: the job ran on the worker, three people came back at about 35-40 ms per frame (tiny, 2 threads), and when the worker was killed the camera switched to the local feed. Not run on the operator PC or against the real cameras yet.
+
+| Variable | Default | |
+|---|---|---|
+| `PERCEPTION_REMOTE_DETECT` | `auto` | `off` = never use a remote worker |
+| `PERCEPTION_REMOTE_MODEL` | `yolox_tiny` | model name the worker loads (`yolox_nano`, `yolox_tiny`) |
+| `PERCEPTION_REMOTE_WORKERS` | unset | fffleet `workerPreference` for detection jobs |
+| `PERCEPTION_REMOTE_REQUIRES` | unset | extra fffleet `requires` for detection jobs |
+| `PERCEPTION_REMOTE_CHECK_MS` | `30000` | how often local cameras look for a remote worker |
+| `PERCEPTION_LOCAL_FPS` | `1` | frame-rate cap of the local feed (detection in this process) |
+| `PERCEPTION_ORT_THREADS` | unset | onnxruntime threads (unset = all cores); `2` on a Pi 4 |
+
+On the worker: `PERCEPTION_MODEL_DIR` (default `/models`), `PERCEPTION_ORT_PROVIDERS` (default `cpu`), `PERCEPTION_ORT_THREADS`. The camera URL in the job must be reachable from the worker, so `MEDIAMTX_RTSP_BASE_URL` has to be an address the operator PC can reach (the Pi's LAN address, not `127.0.0.1`).
+
 ---
 
 ## Network & Port Map

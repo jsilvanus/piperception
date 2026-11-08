@@ -19,6 +19,7 @@ export function frameToRgb(frame: Frame): RgbImage {
     }
     return { width: frame.width, height: frame.height, data: frame.data };
   }
+  if (frame.format !== 'jpeg') throw new Error(`frame format ${frame.format} has no picture`);
   const img = jpeg.decode(frame.data, { useTArray: true, formatAsRGBA: false, maxResolutionInMP: 40, maxMemoryUsageInMB: 256 });
   return { width: img.width, height: img.height, data: img.data };
 }
