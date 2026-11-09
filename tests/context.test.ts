@@ -138,3 +138,60 @@ test('CameraContextClient reads context and health, follows SSE and notices a lo
     await new Promise((r) => server.close(r));
   }
 });
+
+test('CameraContextClient recovers when picam stops answering but the event stream stays open', async () => {
+  // picam stuck while shutting down: the SSE connection stays open and silent, reads fail.
+  let current = ctx({ moving: true, privacyBlur: true });
+  let answering = true;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/v1/events') {
+      if (!answering) return void res.writeHead(503).end();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ type: 'ready', data: {} })}\n\n`);
+      return;
+    }
+    if (!answering) return void res.writeHead(503).end();
+    if (req.url === '/api/v1/cameras/cam1/context') return void res.end(JSON.stringify(current));
+    if (req.url === '/api/v1/cameras/cam1/health') return void res.end(JSON.stringify({ cameraId: 'cam1', state: 'ok' }));
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as AddressInfo).port;
+  const client = new CameraContextClient({ baseUrl: `http://127.0.0.1:${port}`, cameraIds: ['cam1'], reconnectMs: 20, maxReconnectMs: 40, pollMs: 20 });
+  const waitFor = async (cond: () => boolean) => {
+    for (let i = 0; i < 300 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(cond());
+  };
+  try {
+    client.start();
+    await waitFor(() => client.isConnected && client.getView('cam1')!.context?.moving === true);
+    assert.ok(client.lastReadAt > 0);
+
+    answering = false;
+    await waitFor(() => !client.isConnected);
+    assert.deepEqual(assessCamera(client.getView('cam1'), { pauseWhileMoving: true }).reasons.includes('picam-unreachable'), true);
+
+    // picam is back with the camera settled: the old moving/blur state is gone without a restart.
+    current = ctx();
+    answering = true;
+    await waitFor(() => client.isConnected && client.getView('cam1')!.context?.moving === false);
+    assert.deepEqual(assessCamera(client.getView('cam1'), { pauseWhileMoving: true }).reasons, []);
+  } finally {
+    client.stop();
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('frame-driven camera reports running and fps while frames arrive', async () => {
+  const sm = new StreamManager(undefined, false);
+  sm.addStream({ cameraId: 'camF', name: 'F', sourceType: 'mediamtx', enabled: false } as any);
+  assert.equal(sm.getAllStreams()[0]!.running, false);
+  for (let i = 0; i < 12; i++) {
+    await sm.processFrame('camF', { format: 'detections', detections: [] } as any);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const s = sm.getAllStreams()[0]!;
+  assert.equal(s.running, true);
+  assert.ok(s.actualFps > 6 && s.actualFps < 12, `fps ${s.actualFps}`);
+});

@@ -46,7 +46,12 @@ export interface CameraStreamState {
   /** Where the last analysed frame's detections came from: this process or a remote fffleet worker. */
   detectionSource: 'local' | 'remote';
   lastPush: { signature: string; atMs: number };
+  /** Frame-rate window for frame-driven cameras (frames pushed in through processFrame). */
+  fpsWindow: { startMs: number; count: number };
 }
+
+/** A frame-driven camera counts as running while frames arrived within this window. */
+const FRAME_ALIVE_MS = 3000;
 
 export class StreamManager extends EventEmitter {
   private streams = new Map<string, CameraStreamState>();
@@ -136,6 +141,7 @@ export class StreamManager extends EventEmitter {
       trackerResets: 0,
       detectionSource: 'local',
       lastPush: { signature: '', atMs: 0 },
+      fpsWindow: { startMs: 0, count: 0 },
     };
 
     this.streams.set(config.cameraId, state);
@@ -270,6 +276,7 @@ export class StreamManager extends EventEmitter {
     stream.frameIndex++;
     stream.lastFrameTimeMs = now;
     stream.lastProcessingLatencyMs = Math.round((performance.now() - t0) * 10) / 10;
+    countFrame(stream, now);
 
     const event: CameraFrameDetection = {
       cameraId,
@@ -338,12 +345,15 @@ export class StreamManager extends EventEmitter {
     detectionSource: 'local' | 'remote';
   }> {
     const result = [];
+    const now = Date.now();
     for (const [cameraId, s] of this.streams.entries()) {
+      // A real camera has no timer: frames are pushed in, so it runs while they keep arriving.
+      const receiving = s.lastFrameTimeMs > 0 && now - s.lastFrameTimeMs < FRAME_ALIVE_MS;
       result.push({
         cameraId,
-        running: s.running,
+        running: s.running || receiving,
         sourceType: s.config.sourceType,
-        actualFps: s.actualFps,
+        actualFps: s.running || receiving ? s.actualFps : 0,
         latencyMs: s.lastProcessingLatencyMs,
         frameIndex: s.frameIndex,
         trackCount: s.activeTracks.length,
@@ -363,5 +373,22 @@ export class StreamManager extends EventEmitter {
     for (const cameraId of this.streams.keys()) {
       this.stopStream(cameraId);
     }
+  }
+}
+
+/** Frames per second over windows of at least one second, for frames pushed in through processFrame. */
+function countFrame(stream: CameraStreamState, now: number): void {
+  const w = stream.fpsWindow;
+  if (w.startMs === 0 || now - w.startMs > FRAME_ALIVE_MS) {
+    w.startMs = now;
+    w.count = 0;
+    return;
+  }
+  w.count++;
+  const elapsed = now - w.startMs;
+  if (elapsed >= 1000) {
+    stream.actualFps = Math.round((w.count * 1000 / elapsed) * 10) / 10;
+    w.startMs = now;
+    w.count = 0;
   }
 }

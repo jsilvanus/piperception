@@ -15,6 +15,13 @@ export interface CameraContextClientOptions {
    * changes, and the change to `stale` (telemetry stopped) is computed on read, so it needs polling.
    */
   pollMs?: number;
+  /**
+   * Consecutive failed polls (picam not answering /context) after which the link counts as down: the event
+   * stream is dropped and reconnected, and every camera reads "picam unreachable" until picam answers again.
+   */
+  maxPollFailures?: number;
+  /** Time allowed for picam to answer the event stream request (headers). */
+  connectTimeoutMs?: number;
 }
 
 /**
@@ -33,7 +40,10 @@ export class CameraContextClient extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private delayMs: number;
+  private pollFailures = 0;
   lastError: string | undefined;
+  /** When picam last answered a context read (ms since epoch); 0 = never. */
+  lastReadAt = 0;
 
   constructor(private readonly options: CameraContextClientOptions) {
     super();
@@ -92,21 +102,26 @@ export class CameraContextClient extends EventEmitter {
     const ac = new AbortController();
     this.abort = ac;
     try {
-      const res = await this.fetchFn(`${this.baseUrl}/api/v1/events`, {
-        headers: { accept: 'text/event-stream' },
-        signal: ac.signal,
-      });
+      const connectTimer = setTimeout(() => ac.abort(new Error('picam events: no answer')), this.options.connectTimeoutMs ?? 5000);
+      let res: Response;
+      try {
+        res = await this.fetchFn(`${this.baseUrl}/api/v1/events`, {
+          headers: { accept: 'text/event-stream' },
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(connectTimer);
+      }
       if (!res.ok || !res.body) throw new Error(`picam events HTTP ${res.status}`);
       // Subscribe first, then read the state, so no change between the two is lost.
       await Promise.all([...this.cameraIds].map((id) => this.loadCamera(id, ac.signal)));
       this.lastError = undefined;
       this.delayMs = this.options.reconnectMs ?? 1000;
+      this.pollFailures = 0;
       this.setConnected(true);
       const pollMs = this.options.pollMs ?? 2000;
       if (pollMs > 0) {
-        this.pollTimer = setInterval(() => {
-          for (const id of this.cameraIds) void this.loadCamera(id, ac.signal, true).catch(() => {});
-        }, pollMs);
+        this.pollTimer = setInterval(() => void this.poll(ac), pollMs);
         this.pollTimer.unref?.();
       }
       await this.readEvents(res.body, ac.signal);
@@ -123,6 +138,26 @@ export class CameraContextClient extends EventEmitter {
     this.reconnectTimer = setTimeout(() => void this.connect(), delay);
   }
 
+  /**
+   * Re-reads every camera's context and health. The event stream alone can go quiet without ending (picam
+   * stuck while shutting down, a half-open connection), which left old "moving"/"privacy blur" state in
+   * place until this process restarted; polling keeps the view current, and repeated failures reconnect.
+   */
+  private async poll(ac: AbortController): Promise<void> {
+    if (ac.signal.aborted) return;
+    const results = await Promise.all([...this.cameraIds].map((id) => this.loadCamera(id, ac.signal)));
+    if (ac.signal.aborted) return;
+    if (results.some(Boolean)) {
+      this.pollFailures = 0;
+      return;
+    }
+    this.pollFailures++;
+    if (this.pollFailures >= (this.options.maxPollFailures ?? 3)) {
+      this.pollFailures = 0;
+      ac.abort(new Error('picam not answering'));
+    }
+  }
+
   private async getJson(path: string, signal?: AbortSignal): Promise<any> {
     const timeout = AbortSignal.timeout(this.options.requestTimeoutMs ?? 2000);
     const res = await this.fetchFn(`${this.baseUrl}${path}`, {
@@ -132,26 +167,23 @@ export class CameraContextClient extends EventEmitter {
     return res.json();
   }
 
-  private async loadCamera(cameraId: string, signal?: AbortSignal, contextOnly = false): Promise<void> {
+  /** Reads one camera's context and health; true when picam answered the context read. */
+  private async loadCamera(cameraId: string, signal?: AbortSignal): Promise<boolean> {
     const enc = encodeURIComponent(cameraId);
-    if (contextOnly) {
-      const ctx = await this.getJson(`/api/v1/cameras/${enc}/context`, signal);
-      const view = this.views.get(cameraId);
-      if (!view || !isContext(ctx)) return;
-      const changed = JSON.stringify(view.context) !== JSON.stringify(ctx);
-      view.context = ctx;
-      if (changed) this.emit('change', cameraId, view);
-      return;
-    }
     const [ctx, health] = await Promise.allSettled([
       this.getJson(`/api/v1/cameras/${enc}/context`, signal),
       this.getJson(`/api/v1/cameras/${enc}/health`, signal),
     ]);
     const view = this.views.get(cameraId);
-    if (!view) return;
-    view.context = ctx.status === 'fulfilled' && isContext(ctx.value) ? ctx.value : null;
-    view.health = health.status === 'fulfilled' ? healthState(health.value?.state) : 'unknown';
-    this.emit('change', cameraId, view);
+    if (!view || signal?.aborted) return false;
+    const context = ctx.status === 'fulfilled' && isContext(ctx.value) ? ctx.value : null;
+    const healthNow: CameraHealthState = health.status === 'fulfilled' ? healthState(health.value?.state) : 'unknown';
+    const changed = JSON.stringify(view.context) !== JSON.stringify(context) || view.health !== healthNow;
+    view.context = context;
+    view.health = healthNow;
+    if (changed) this.emit('change', cameraId, view);
+    if (ctx.status === 'fulfilled') this.lastReadAt = Date.now();
+    return ctx.status === 'fulfilled';
   }
 
   private async readEvents(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<void> {
