@@ -43,7 +43,11 @@ export function createServer(
       detector: detectorInfo,
       settings: streamManager.settings,
       picam: extras.contextClient
-        ? { connected: extras.contextClient.isConnected, lastError: extras.contextClient.lastError ?? null }
+        ? {
+            connected: extras.contextClient.isConnected,
+            lastError: extras.contextClient.lastError ?? null,
+            lastReadAt: extras.contextClient.lastReadAt ? new Date(extras.contextClient.lastReadAt).toISOString() : null,
+          }
         : null,
       cameras: Object.fromEntries(
         streams.map((s) => [
