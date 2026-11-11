@@ -54,6 +54,7 @@ interface RemoteState {
 export interface FeedManagerOptions {
   mediaMtxRtspBaseUrl: string;
   mediaMtxRtmpBaseUrl?: string;
+  mediaMtxApiUrl?: string | undefined;
   fffleetUrl: string;
   fffleetToken?: string | undefined;
   fffleetClientId?: string | undefined;
@@ -94,6 +95,7 @@ export class FeedManager extends EventEmitter {
   private readonly streamManager: StreamManager;
   private readonly mediaMtxRtspBaseUrl: string;
   private readonly mediaMtxRtmpBaseUrl: string;
+  private readonly mediaMtxApiUrl: string | undefined;
   private readonly fffleetUrl: string;
   private readonly fleetAuth: { token?: string; clientId?: string; clientSecret?: string };
   private readonly mjpegWorkers: string[];
@@ -120,6 +122,7 @@ export class FeedManager extends EventEmitter {
     this.placementTimeoutMs = options.placementTimeoutMs ?? 5000;
     this.mediaMtxRtspBaseUrl = options.mediaMtxRtspBaseUrl.replace(/\/+$/, '');
     this.mediaMtxRtmpBaseUrl = (options.mediaMtxRtmpBaseUrl ?? 'rtmp://127.0.0.1:1935').replace(/\/+$/, '');
+    this.mediaMtxApiUrl = options.mediaMtxApiUrl ? options.mediaMtxApiUrl.replace(/\/+$/, '') : undefined;
     this.fffleetUrl = options.fffleetUrl;
     this.now = options.now ?? Date.now;
     this.localFps = options.localFps && options.localFps > 0 ? options.localFps : undefined;
@@ -193,6 +196,35 @@ export class FeedManager extends EventEmitter {
     return state;
   }
 
+  /**
+   * Queries MediaMTX REST API to discover incoming stream resolution if available.
+   * If detected, updates feed.config.width and feed.config.height.
+   */
+  async probeResolution(cameraId: string): Promise<{ width: number; height: number } | null> {
+    if (!this.mediaMtxApiUrl) return null;
+    try {
+      const url = `${this.mediaMtxApiUrl}/v3/paths/get/${encodeURIComponent(cameraId)}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) return null;
+      const data: any = await res.json();
+      const tracks = data.tracks2 || [];
+      const h264 = tracks.find((t: any) => t.codec === 'H264');
+      if (h264?.codecProps?.width && h264?.codecProps?.height) {
+        const width = Number(h264.codecProps.width);
+        const height = Number(h264.codecProps.height);
+        const feed = this.feeds.get(cameraId);
+        if (feed) {
+          feed.config.width = width;
+          feed.config.height = height;
+        }
+        return { width, height };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   async startFeed(cameraId: string): Promise<boolean> {
     const feed = this.feeds.get(cameraId);
     if (!feed) return false;
@@ -216,6 +248,7 @@ export class FeedManager extends EventEmitter {
     }
 
     this.ensureRemoteWatch();
+    await this.probeResolution(cameraId);
     if (await this.shouldTryRemote(cameraId)) {
       if (await this.startRemote(cameraId)) return true;
     }

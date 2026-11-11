@@ -68,6 +68,7 @@ export async function startPerceptionServer(): Promise<void> {
   const feedManager = new FeedManager(streamManager, {
     mediaMtxRtspBaseUrl: config.mediaMtxRtspBaseUrl ?? 'rtsp://127.0.0.1:8554',
     mediaMtxRtmpBaseUrl: config.mediaMtxRtmpBaseUrl ?? 'rtmp://127.0.0.1:1935',
+    mediaMtxApiUrl: config.mediaMtxApiUrl ?? 'http://127.0.0.1:9997',
     fffleetUrl: config.fffleetUrl ?? 'http://127.0.0.1:5000',
     fffleetToken: config.fffleetToken,
     fffleetClientId: config.fffleetClientId,

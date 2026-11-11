@@ -163,3 +163,40 @@ test('FeedManager parses MJPEG when fffleet chose the mjpeg variant', async () =
   assert.equal(frames[0]!.format, 'jpeg');
   assert.equal(feed.variant, 'mjpeg');
 });
+
+test('FeedManager probeResolution discovers dimensions from mediaMtxApiUrl', async () => {
+  const fakeFetch: any = async (url: string) => {
+    if (url.includes('/v3/paths/get/cam1')) {
+      return {
+        ok: true,
+        json: async () => ({
+          tracks2: [
+            { codec: 'H264', codecProps: { width: 960, height: 540 } },
+            { codec: 'MPEG-4 Audio' },
+          ],
+        }),
+      };
+    }
+    return { ok: false, status: 404 };
+  };
+
+  const fm = new FeedManager(new StreamManager(undefined, false), {
+    mediaMtxRtspBaseUrl: 'rtsp://127.0.0.1:8554',
+    mediaMtxApiUrl: 'http://127.0.0.1:9997',
+    fffleetUrl: 'http://127.0.0.1:5000',
+  });
+  fm.setupFeed({ cameraId: 'cam1', sourceType: 'mediamtx' });
+
+  // Mock global fetch for probe
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = fakeFetch;
+    const probed = await fm.probeResolution('cam1');
+    assert.deepEqual(probed, { width: 960, height: 540 });
+    const feed = fm.getFeed('cam1');
+    assert.equal(feed?.config.width, 960);
+    assert.equal(feed?.config.height, 540);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

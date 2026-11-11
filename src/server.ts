@@ -303,6 +303,9 @@ function getDashboardHtml(config: AppConfig, pusher: PiSpacePusher): string {
     .card-title { font-size: 15px; font-weight: 600; }
     .cam-canvas-wrap { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 6px; overflow: hidden; }
     canvas { width: 100%; height: 100%; display: block; }
+    .cam-canvas-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+    .cam-canvas-wrap canvas { position: absolute; inset: 0; pointer-events: none; }
+    button.on { background: #0369a1; border-color: var(--accent); }
     .controls { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     button, select { background: #334155; color: #fff; border: 1px solid #475569; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; }
     button:hover { background: #475569; }
@@ -347,7 +350,7 @@ function getDashboardHtml(config: AppConfig, pusher: PiSpacePusher): string {
             <span class="badge \${s.running ? 'ok' : 'err'}" id="status-\${s.cameraId}">\${s.running ? 'ACTIVE' : 'STOPPED'}</span>
           </div>
           <div class="cam-canvas-wrap">
-            <canvas id="canvas-\${s.cameraId}" width="640" height="360"></canvas>
+            <canvas id="canvas-\${s.cameraId}" width="960" height="540"></canvas>
           </div>
           <div class="stats" id="stats-\${s.cameraId}">
             <span>FPS: \${s.actualFps}</span>
@@ -363,10 +366,12 @@ function getDashboardHtml(config: AppConfig, pusher: PiSpacePusher): string {
               <option value="wander">Path: Central Aisle</option>
             </select>
             <button onclick="toggleStream('\${s.cameraId}', \${!s.running})">Toggle Run</button>
+            <button id="videoBtn-\${s.cameraId}" onclick="toggleVideo('\${s.cameraId}')">Camera feed</button>
           </div>
         \`;
         streamGrid.appendChild(div);
 
+        applyVideo(s.cameraId);
         document.getElementById("path-" + s.cameraId).addEventListener("change", (e) => {
           fetch("/api/v1/streams/" + s.cameraId + "/path", {
             method: "POST",
@@ -380,17 +385,22 @@ function getDashboardHtml(config: AppConfig, pusher: PiSpacePusher): string {
       const canvas = document.getElementById("canvas-" + s.cameraId);
       if (canvas && s.activeTracks) {
         const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#090d16";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        if (videoOn(s.cameraId)) {
+          // Camera feed is shown behind the canvas: keep it transparent, draw only the boxes.
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        } else {
+          ctx.fillStyle = "#090d16";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Grid lines
-        ctx.strokeStyle = "#1e293b";
-        ctx.lineWidth = 1;
-        for (let x = 0; x < canvas.width; x += 40) {
-          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-        }
-        for (let y = 0; y < canvas.height; y += 40) {
-          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+          // Grid lines
+          ctx.strokeStyle = "#1e293b";
+          ctx.lineWidth = 1;
+          for (let x = 0; x < canvas.width; x += 40) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+          }
+          for (let y = 0; y < canvas.height; y += 40) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+          }
         }
 
         // Draw bounding boxes
@@ -429,6 +439,37 @@ function getDashboardHtml(config: AppConfig, pusher: PiSpacePusher): string {
           <span>Tracks: <strong>\${s.trackCount}</strong></span>
         \`;
       }
+    }
+
+    // Camera feed toggle: MediaMTX WebRTC page of the camera path, shown behind the box canvas.
+    // Served by MediaMTX on :8889 of the same host the console was opened from. Preference is remembered.
+    function videoOn(cameraId) {
+      return localStorage.getItem("perception.video." + cameraId) === "1";
+    }
+
+    function applyVideo(cameraId) {
+      const wrap = document.getElementById("canvas-" + cameraId).parentElement;
+      const btn = document.getElementById("videoBtn-" + cameraId);
+      let frame = wrap.querySelector("iframe");
+      if (videoOn(cameraId)) {
+        if (!frame) {
+          frame = document.createElement("iframe");
+          frame.allow = "autoplay";
+          frame.src = location.protocol + "//" + location.hostname + ":8889/" + encodeURIComponent(cameraId) + "?controls=false&muted=true&autoplay=true";
+          wrap.insertBefore(frame, wrap.firstChild);
+        }
+        btn.classList.add("on");
+        btn.textContent = "Camera feed: ON";
+      } else {
+        if (frame) frame.remove();
+        btn.classList.remove("on");
+        btn.textContent = "Camera feed: OFF";
+      }
+    }
+
+    function toggleVideo(cameraId) {
+      localStorage.setItem("perception.video." + cameraId, videoOn(cameraId) ? "0" : "1");
+      applyVideo(cameraId);
     }
 
     async function toggleStream(cameraId, start) {

@@ -117,6 +117,7 @@ export interface AppConfig {
   modelPath?: string | undefined;
   mediaMtxRtspBaseUrl?: string | undefined;
   mediaMtxRtmpBaseUrl?: string | undefined;
+  mediaMtxApiUrl?: string | undefined;
   fffleetUrl?: string | undefined;
   udpGatewayHost?: string | undefined;
   udpGatewayPort?: number | undefined;

@@ -25,6 +25,7 @@ export function loadConfig(): AppConfig {
   const autostartFeeds = process.env.PERCEPTION_AUTOSTART_FEEDS === 'true';
   const mediaMtxRtspBaseUrl = process.env.MEDIAMTX_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
   const mediaMtxRtmpBaseUrl = process.env.MEDIAMTX_RTMP_BASE_URL ?? 'rtmp://127.0.0.1:1935';
+  const mediaMtxApiUrl = process.env.MEDIAMTX_API_URL ?? 'http://127.0.0.1:9997';
   const fffleetUrl = process.env.FFFLEET_URL ?? 'http://127.0.0.1:5000';
   const udpGatewayHost = process.env.UDP_GATEWAY_HOST ?? '127.0.0.1';
   const udpGatewayPort = parseInt(process.env.UDP_GATEWAY_PORT ?? '40002', 10);
@@ -79,6 +80,7 @@ export function loadConfig(): AppConfig {
     modelPath,
     mediaMtxRtspBaseUrl,
     mediaMtxRtmpBaseUrl,
+    mediaMtxApiUrl,
     fffleetUrl,
     udpGatewayHost,
     udpGatewayPort,
