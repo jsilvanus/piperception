@@ -204,3 +204,23 @@ test('FeedManager URL resolution and lifecycle endpoints', async () => {
   udpPublisher.close();
   await app.close();
 });
+
+test('FeedManager defaults to 5 fps and 640x480 feed config', async () => {
+  const config = loadConfig();
+  assert.equal(config.defaultFps, 5);
+
+  const pusher = new PiSpacePusher('http://127.0.0.1:9999');
+  const streamManager = new StreamManager(pusher, false);
+  const feedManager = new FeedManager(streamManager, {
+    mediaMtxRtspBaseUrl: 'rtsp://127.0.0.1:8554',
+    fffleetUrl: 'http://127.0.0.1:5000',
+  });
+
+  const rgbFeed = feedManager.setupFeed({
+    cameraId: 'cam1',
+    sourceType: 'mediamtx',
+  });
+  assert.equal(rgbFeed.config.fps, 5);
+  assert.equal(rgbFeed.config.width, 640);
+  assert.equal(rgbFeed.config.height, 480);
+});

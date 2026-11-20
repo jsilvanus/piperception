@@ -158,7 +158,7 @@ export class StreamManager extends EventEmitter {
     if (!stream || stream.running) return false;
 
     stream.running = true;
-    const fps = stream.config.fps ?? 10;
+    const fps = stream.config.fps ?? 5;
     const intervalMs = Math.max(20, Math.floor(1000 / fps));
 
     let lastTime = Date.now();

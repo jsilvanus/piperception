@@ -29,6 +29,27 @@ export interface OnnxDetectorOptions {
   threads?: number | undefined;
 }
 
+/**
+ * Convert an interleaved rgb24 Buffer (H * W * 3 bytes) to a planar NCHW Float32Array
+ * with 0..255 float values expected by YOLOX.
+ * If the buffer is shorter than `inputSize * inputSize * 3`, converts available
+ * pixels and leaves the remaining elements zero-filled.
+ */
+export function rgb24ToNchwFloat32(rgb24: Buffer, inputSize: number): Float32Array {
+  const planeSize = inputSize * inputSize;
+  const floatData = new Float32Array(3 * planeSize);
+  const pixelCount = Math.min(planeSize, Math.floor(rgb24.length / 3));
+
+  for (let i = 0; i < pixelCount; i++) {
+    const srcIdx = i * 3;
+    floatData[i] = rgb24[srcIdx]!;
+    floatData[planeSize + i] = rgb24[srcIdx + 1]!;
+    floatData[2 * planeSize + i] = rgb24[srcIdx + 2]!;
+  }
+
+  return floatData;
+}
+
 export class OnnxDetector implements DetectorBackend {
   readonly name = 'onnx';
   private session: any = null;

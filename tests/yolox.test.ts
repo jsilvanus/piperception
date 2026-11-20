@@ -6,6 +6,7 @@ import {
   nms,
   candidateToNormalized,
 } from '../src/detector/yolox-decoder.js';
+import { rgb24ToNchwFloat32 } from '../src/detector/onnx-backend.js';
 
 test('anchorCount calculates correct anchors for strides 8, 16, 32', () => {
   // 640 input: (640/8)^2 + (640/16)^2 + (640/32)^2 = 6400 + 1600 + 400 = 8400
@@ -68,4 +69,38 @@ test('candidateToNormalized converts to 0..1 bounding boxes', () => {
   assert.equal(norm.rect.y, 0.05);
   assert.equal(norm.rect.w, 0.2);
   assert.equal(norm.rect.h, 0.3);
+});
+
+test('rgb24ToNchwFloat32 converts interleaved rgb24 pixels to planar NCHW float32', () => {
+  const inputSize = 2;
+  const planeSize = inputSize * inputSize; // 4 pixels
+  // 4 pixels: (10,20,30), (40,50,60), (70,80,90), (100,110,120)
+  const rgb24 = Buffer.from([
+    10, 20, 30,
+    40, 50, 60,
+    70, 80, 90,
+    100, 110, 120,
+  ]);
+
+  const out = rgb24ToNchwFloat32(rgb24, inputSize);
+  assert.equal(out.length, 3 * planeSize);
+  // R plane
+  assert.deepEqual(Array.from(out.slice(0, planeSize)), [10, 40, 70, 100]);
+  // G plane
+  assert.deepEqual(Array.from(out.slice(planeSize, 2 * planeSize)), [20, 50, 80, 110]);
+  // B plane
+  assert.deepEqual(Array.from(out.slice(2 * planeSize, 3 * planeSize)), [30, 60, 90, 120]);
+});
+
+test('rgb24ToNchwFloat32 gracefully handles shorter dummy buffers', () => {
+  const inputSize = 4; // 16 pixels -> 48 elements
+  const shortBuf = Buffer.from([12, 34, 56, 78]); // 1 full pixel + 1 trailing byte
+  const out = rgb24ToNchwFloat32(shortBuf, inputSize);
+  assert.equal(out.length, 3 * 16);
+  assert.equal(out[0], 12);
+  assert.equal(out[16], 34);
+  assert.equal(out[32], 56);
+  assert.equal(out[1], 0);
+  assert.equal(out[17], 0);
+  assert.equal(out[33], 0);
 });

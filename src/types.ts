@@ -59,6 +59,9 @@ export interface FeedConfig {
   /** Frame size the fleet job scales to (default 640x480). Raw frames are cut by this size. */
   width?: number | undefined;
   height?: number | undefined;
+  format?: 'rgb24' | 'mjpeg' | undefined;
+  inputSize?: number | undefined;
+  scale?: string | undefined;
   /** MJPEG quality for the MJPEG variant. */
   quality?: number | undefined;
   fleetUrl?: string | undefined;
