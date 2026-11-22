@@ -19,7 +19,7 @@ import { OnnxDetector } from '../detector/onnx-backend.js';
 import type { DetectorBackend } from '../detector/types.js';
 import { RawFrameSplitter, type Frame } from '../ingest/frame.js';
 import type { RawDetection } from '../types.js';
-import { DETECT_JOB_TYPE, encodeFrameLine, encodeHelloLine, readDetectPayload, type DetectPayload } from './detect-protocol.js';
+import { DETECT_JOB_TYPE, encodeFrameLine, encodeHelloLine, prescaledSize, readDetectPayload, type DetectPayload } from './detect-protocol.js';
 
 const KILL_GRACE_MS = 3000;
 const TAIL_CHARS = 2000;
@@ -93,10 +93,16 @@ async function defaultDetectorFor(p: DetectPayload, env: NodeJS.ProcessEnv) {
 
 export function ffmpegArgs(url: string, p: DetectPayload): string[] {
   const pre = url.startsWith('rtsp') ? ['-rtsp_transport', 'tcp'] : [];
+  let vf = `fps=${p.fps},scale=${p.width}:${p.height}`;
+  if (p.prescale) {
+    // Letterbox in ffmpeg: aspect-keeping scale into the top-left of an inputSize square, padded with 114 (0x72).
+    const r = prescaledSize(p.width, p.height, p.inputSize);
+    vf = `fps=${p.fps},scale=${r.width}:${r.height}:flags=bilinear,pad=${p.inputSize}:${p.inputSize}:0:0:color=0x727272`;
+  }
   return [
     '-hide_banner', '-nostats', '-loglevel', 'warning',
     ...pre, '-i', url, '-an',
-    '-vf', `fps=${p.fps},scale=${p.width}:${p.height}`,
+    '-vf', vf,
     '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1',
   ];
 }
@@ -136,7 +142,10 @@ export async function runDetect(spec: Record<string, any>, rt: DetectRuntime, de
     rt.stderr?.(stderr);
   });
 
-  const splitter = new RawFrameSplitter(payload.width, payload.height);
+  const outW = payload.prescale ? payload.inputSize : payload.width;
+  const outH = payload.prescale ? payload.inputSize : payload.height;
+  const prescaled = payload.prescale ? { srcWidth: payload.width, srcHeight: payload.height } : undefined;
+  const splitter = new RawFrameSplitter(outW, outH);
   let pending: Frame | null = null;
   let busy = false;
   let detectError: Error | null = null;
@@ -159,7 +168,7 @@ export async function runDetect(spec: Record<string, any>, rt: DetectRuntime, de
   };
   child.stdout?.on('data', (chunk: Buffer) => {
     for (const data of splitter.push(chunk)) {
-      pending = { cameraId: String(spec.labels?.camera ?? 'cam'), tsMs: Date.now(), format: 'rgb24', width: payload.width, height: payload.height, data };
+      pending = { cameraId: String(spec.labels?.camera ?? 'cam'), tsMs: Date.now(), format: 'rgb24', width: outW, height: outH, data, prescaled };
     }
     void pump();
   });

@@ -20,6 +20,12 @@ export interface Frame {
   width: number;
   height: number;
   data: Buffer;
+  /**
+   * Set when ffmpeg already letterboxed the frame into a square model-input canvas (top-left placement,
+   * padded with 114). `srcWidth`/`srcHeight` are the size of the picture before scaling; the detector can
+   * skip its own resize and map boxes back with them.
+   */
+  prescaled?: { srcWidth: number; srcHeight: number } | undefined;
 }
 
 /** Splits a rawvideo byte stream into fixed-size frames (width * height * 3 bytes each). */

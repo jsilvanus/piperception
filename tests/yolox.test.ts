@@ -104,3 +104,8 @@ test('rgb24ToNchwFloat32 gracefully handles shorter dummy buffers', () => {
   assert.equal(out[17], 0);
   assert.equal(out[33], 0);
 });
+
+test('rgb24ToNchwFloat32 can write BGR planes', () => {
+  const out = rgb24ToNchwFloat32(Buffer.from([10, 20, 30]), 1, 'bgr');
+  assert.deepEqual(Array.from(out), [30, 20, 10]);
+});
