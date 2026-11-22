@@ -202,7 +202,7 @@ test('the executor turns ffmpeg frames into detect lines and stops on abort', as
   };
   let attached: PassThrough | null = null;
   const abort = new AbortController();
-  const spec = buildDetectJobSpec({ cameraId: 'cam1', streamUrl: 'rtsp://mediamtx:8554/cam1', width: w, height: h });
+  const spec = buildDetectJobSpec({ cameraId: 'cam1', streamUrl: 'rtsp://mediamtx:8554/cam1', width: w, height: h, prescale: false });
   let args: string[] = [];
   const done = runDetect(
     spec,
@@ -233,4 +233,20 @@ test('the executor refuses specs it should not run', async () => {
   const spec = buildDetectJobSpec({ cameraId: 'c', streamUrl: 'file:///etc/passwd' });
   await assert.rejects(runDetect(spec, rt, deps), /not allowed/);
   await assert.rejects(runDetect({ type: DETECT_JOB_TYPE }, rt, deps), /required/);
+});
+
+test('prescale: ffmpeg letterboxes into the model canvas and the executor reads square frames', async () => {
+  const { buildDetectJobSpec, prescaledSize } = await import('../src/fleet/detect-protocol.js');
+  const { ffmpegArgs } = await import('../src/fleet/detect-executor.js');
+  const { readDetectPayload } = await import('../src/fleet/detect-protocol.js');
+  const spec = buildDetectJobSpec({ streamUrl: 'rtsp://x/cam1', cameraId: 'cam1' });
+  const payload = readDetectPayload(spec as Record<string, any>);
+  assert.equal(payload.prescale, true);
+  assert.deepEqual(prescaledSize(640, 480, 416), { width: 416, height: 312 });
+  const vf = ffmpegArgs('rtsp://x/cam1', payload)[ffmpegArgs('rtsp://x/cam1', payload).indexOf('-vf') + 1]!;
+  assert.equal(vf, 'fps=5,scale=416:312:flags=bilinear,pad=416:416:0:0:color=0x727272');
+  // Without the flag the old full-size path is kept.
+  const old = readDetectPayload({ perception_detect: undefined, 'perception-detect': { ...payload, prescale: false } });
+  assert.equal(old.prescale, false);
+  assert.match(ffmpegArgs('rtsp://x/cam1', old).join(' '), /scale=640:480(?!:)/);
 });

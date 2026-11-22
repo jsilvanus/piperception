@@ -22,6 +22,12 @@ export interface DetectPayload {
   channelOrder: 'bgr' | 'rgb';
   confThreshold: number;
   nmsThreshold: number;
+  /**
+   * Let ffmpeg scale and pad each frame to the model's inputSize x inputSize (YOLOX letterbox, top-left,
+   * grey 114), so the worker skips its own resize. width/height then only say what the picture is scaled
+   * from. Workers without this field send width x height frames as before.
+   */
+  prescale: boolean;
 }
 
 export interface DetectJobOptions extends Partial<DetectPayload> {
@@ -43,6 +49,7 @@ export function buildDetectJobSpec(o: DetectJobOptions): Record<string, unknown>
     channelOrder: o.channelOrder ?? 'bgr',
     confThreshold: o.confThreshold ?? 0.35,
     nmsThreshold: o.nmsThreshold ?? 0.45,
+    prescale: o.prescale ?? true,
   };
   const spec: Record<string, unknown> = {
     type: DETECT_JOB_TYPE,
@@ -80,7 +87,14 @@ export function readDetectPayload(spec: Record<string, any>): DetectPayload {
     channelOrder: p.channelOrder === 'rgb' ? 'rgb' : 'bgr',
     confThreshold: num(p.confThreshold, 'confThreshold'),
     nmsThreshold: num(p.nmsThreshold, 'nmsThreshold'),
+    prescale: p.prescale === true,
   };
+}
+
+/** Size the picture has after ffmpeg's aspect-keeping scale into the model canvas (same rounding as letterbox()). */
+export function prescaledSize(width: number, height: number, inputSize: number): { width: number; height: number } {
+  const ratio = Math.min(inputSize / width, inputSize / height);
+  return { width: Math.min(inputSize, Math.max(1, Math.round(width * ratio))), height: Math.min(inputSize, Math.max(1, Math.round(height * ratio))) };
 }
 
 /** One line of the job's stdout. `hello` comes first, then one `frame` line per analysed frame. */

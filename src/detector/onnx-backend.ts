@@ -35,16 +35,18 @@ export interface OnnxDetectorOptions {
  * If the buffer is shorter than `inputSize * inputSize * 3`, converts available
  * pixels and leaves the remaining elements zero-filled.
  */
-export function rgb24ToNchwFloat32(rgb24: Buffer, inputSize: number): Float32Array {
+export function rgb24ToNchwFloat32(rgb24: Buffer, inputSize: number, channelOrder: 'bgr' | 'rgb' = 'rgb'): Float32Array {
   const planeSize = inputSize * inputSize;
   const floatData = new Float32Array(3 * planeSize);
   const pixelCount = Math.min(planeSize, Math.floor(rgb24.length / 3));
 
+  const r = channelOrder === 'bgr' ? 2 * planeSize : 0;
+  const b = channelOrder === 'bgr' ? 0 : 2 * planeSize;
   for (let i = 0; i < pixelCount; i++) {
     const srcIdx = i * 3;
-    floatData[i] = rgb24[srcIdx]!;
+    floatData[r + i] = rgb24[srcIdx]!;
     floatData[planeSize + i] = rgb24[srcIdx + 1]!;
-    floatData[2 * planeSize + i] = rgb24[srcIdx + 2]!;
+    floatData[b + i] = rgb24[srcIdx + 2]!;
   }
 
   return floatData;
@@ -103,8 +105,17 @@ export class OnnxDetector implements DetectorBackend {
       await this.init();
     }
 
-    const rgb = frameToRgb(frame);
-    const { tensor: input, ratio } = letterbox(rgb, this.inputSize, { channelOrder: this.channelOrder });
+    // A frame ffmpeg already letterboxed to inputSize x inputSize only needs the channel/plane shuffle.
+    const pre = frame.prescaled;
+    const direct = !!pre && frame.format === 'rgb24' && frame.width === this.inputSize && frame.height === this.inputSize &&
+      frame.data.length === this.inputSize * this.inputSize * 3;
+    const rgb = direct ? { width: pre!.srcWidth, height: pre!.srcHeight, data: frame.data } : frameToRgb(frame);
+    const { tensor: input, ratio } = direct
+      ? {
+          tensor: rgb24ToNchwFloat32(frame.data, this.inputSize, this.channelOrder),
+          ratio: Math.min(this.inputSize / pre!.srcWidth, this.inputSize / pre!.srcHeight),
+        }
+      : letterbox(rgb, this.inputSize, { channelOrder: this.channelOrder });
 
     const runtime = this.ort.default ?? this.ort;
     const inputName = this.session.inputNames[0];
